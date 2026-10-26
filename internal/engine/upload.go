@@ -18,7 +18,7 @@ import (
 )
 
 // ErrProblems means the run finished but some files failed or did not verify.
-var ErrProblems = errors.New("some files could not be uploaded or verified")
+var ErrProblems = errors.New("some files had problems or need you (listed above)")
 
 // Summary describes what a run did (used by tests and the final message).
 type Summary struct {

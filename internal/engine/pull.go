@@ -16,7 +16,7 @@ import (
 // versions to replace) before the usual download runs. It fills replaceOK
 // with the paths the download may overwrite. done is true after a dry run.
 func pullRemovalsAndMoves(ctx context.Context, cfg Config, ui *term.Console, d *gdrive.Drive, st *State, target, rootID string,
-	files []remoteFile, replaceOK map[string]bool) (done bool, err error) {
+	files []remoteFile, replaceOK, allowed map[string]bool) (done bool, err error) {
 	removed, err := loadRemoved(ctx, d, cfg.RemoteName, rootID)
 	if err != nil {
 		return false, err
@@ -46,13 +46,15 @@ func pullRemovalsAndMoves(ctx context.Context, cfg Config, ui *term.Console, d *
 		}
 	}
 	plan := planMirror(remote, local, md5s, removed, cfg.Overwrite)
-	printMirrorPlan(ui, plan, cfg.DryRun, "download", "here")
+	if cfg.applying == nil { // the check: save the plan, change nothing
+		printMirrorPlan(ui, plan, "download", "here")
+		warnMassRemoval(ui, len(plan.remove), len(local), "here")
+		return true, savePlan(cfg, ui, &savedPlan{Kind: "pull", Source: target, RemoteName: cfg.RemoteName,
+			Steps: mirrorSteps(plan, md5s, "download", "here"), Conflicts: plan.conflicts})
+	}
+	plan = filterMirror(plan, md5s, matchSteps(ui, cfg.applying, mirrorSteps(plan, md5s, "download", "here")))
 	if err := checkMassRemoval(len(plan.remove), len(local), "here", cfg); err != nil {
 		return false, err
-	}
-	if cfg.DryRun {
-		ui.Println("Dry run: nothing was downloaded or changed.")
-		return true, nil
 	}
 
 	var emptied []string
@@ -82,6 +84,9 @@ func pullRemovalsAndMoves(ctx context.Context, cfg Config, ui *term.Console, d *
 	}
 	for rel := range plan.replace {
 		replaceOK[rel] = true
+	}
+	for _, r := range plan.fetch {
+		allowed[r.Rel] = true
 	}
 	return false, nil
 }

@@ -33,9 +33,13 @@ type Config struct {
 	Pull              bool     // download that also follows removals and moves (dhaara pull)
 	Exclude           []string // paths left alone everywhere (see tree.go)
 	AllowManyRemovals bool
-	Trash             func(path string) error // moves a local file to the trash
-	PhoneDir          string                  // phone: the folder on the phone
-	ADB               string                  // phone: the adb program
+	Trash             func(path string) error  // moves a local file to the trash
+	PhoneDir          string                   // phone: the folder on the phone
+	ADB               string                   // phone: the adb program
+	Yes               bool                     // apply: don't ask
+	Confirm           func(prompt string) bool // apply: ask the user; nil when there's no terminal
+
+	applying *savedPlan // set by Apply: carry out this plan instead of saving one
 }
 
 // freeSpace is a variable so tests can pretend the disk is full.

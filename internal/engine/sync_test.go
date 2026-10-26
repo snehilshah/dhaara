@@ -80,8 +80,7 @@ func (e *env) curate() {
 	e.write(tReport, "a report that stays here")
 }
 
-func (e *env) sync(ctx context.Context, src string, change func(*Config)) (SyncSummary, error) {
-	e.t.Helper()
+func (e *env) syncCfg(src string, change func(*Config)) Config {
 	cfg := e.cfg
 	cfg.Mode, cfg.Source = "sync", src
 	if cfg.RemoteName == "" {
@@ -90,10 +89,51 @@ func (e *env) sync(ctx context.Context, src string, change func(*Config)) (SyncS
 	if change != nil {
 		change(&cfg)
 	}
-	return Sync(ctx, cfg, term.NewPlain(e.out))
+	return cfg
 }
 
-func (e *env) pull(ctx context.Context, local string, change func(*Config)) (DownloadSummary, error) {
+// syncCheck is "dhaara sync": it saves a plan and changes nothing.
+func (e *env) syncCheck(ctx context.Context, src string, change func(*Config)) (SyncSummary, error) {
+	e.t.Helper()
+	return Sync(ctx, e.syncCfg(src, change), term.NewPlain(e.out))
+}
+
+// planFor returns the pending plan of this kind for the local folder, or nil.
+func (e *env) planFor(kind, src string) *savedPlan {
+	e.t.Helper()
+	abs, _ := filepath.Abs(src)
+	plans, err := loadPlans(e.cfg, abs)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for _, p := range plans {
+		if p.Kind == kind {
+			return p
+		}
+	}
+	return nil
+}
+
+// sync is "dhaara sync" then "dhaara apply" for that plan.
+func (e *env) sync(ctx context.Context, src string, change func(*Config)) (SyncSummary, error) {
+	e.t.Helper()
+	sum, err := e.syncCheck(ctx, src, change)
+	p := e.planFor("sync", src)
+	if p == nil || (err != nil && !errors.Is(err, ErrProblems)) {
+		return sum, err
+	}
+	checkErr := err
+	cfg := e.syncCfg(src, change)
+	cfg.applying = p
+	sum, err = Sync(ctx, cfg, term.NewPlain(e.out))
+	os.Remove(p.path)
+	if err == nil {
+		err = checkErr // conflicts found by the check
+	}
+	return sum, err
+}
+
+func (e *env) pullCheck(ctx context.Context, local string, change func(*Config)) (DownloadSummary, error) {
 	e.t.Helper()
 	return e.download(ctx, local, func(c *Config) {
 		c.Mode, c.Pull = "pull", true
@@ -101,6 +141,23 @@ func (e *env) pull(ctx context.Context, local string, change func(*Config)) (Dow
 			change(c)
 		}
 	})
+}
+
+func (e *env) pull(ctx context.Context, local string, change func(*Config)) (DownloadSummary, error) {
+	e.t.Helper()
+	sum, err := e.pullCheck(ctx, local, change)
+	p := e.planFor("pull", local)
+	if p == nil || err != nil {
+		return sum, err
+	}
+	sum, err = e.download(ctx, local, func(c *Config) {
+		c.Mode, c.Pull, c.applying = "pull", true, p
+		if change != nil {
+			change(c)
+		}
+	})
+	os.Remove(p.path)
+	return sum, err
 }
 
 // readDir returns every file under root, without excluded ones.
@@ -253,13 +310,13 @@ func TestSyncFollowsLocalChanges(t *testing.T) {
 	e.curate()
 
 	before := e.fd.snapshotCounts()
-	if _, err := e.sync(context.Background(), e.src, func(c *Config) { c.DryRun = true }); err != nil {
+	if _, err := e.syncCheck(context.Background(), e.src, nil); err != nil {
 		t.Fatalf("dry run: %v\n%s", err, e.out)
 	}
 	if d := delta(before, e.fd.snapshotCounts()); d["trash"]+d["move"]+d["rename"]+d["multipart"]+d["initiate"] != 0 {
 		t.Fatalf("dry run changed Drive: %v", d)
 	}
-	if !strings.Contains(e.out.String(), "would move to Drive's trash "+tDeleted1) {
+	if !strings.Contains(e.out.String(), "move to Drive's trash "+tDeleted1) {
 		t.Errorf("dry run should list the deletion:\n%s", e.out)
 	}
 
@@ -328,7 +385,7 @@ func TestPullFollowsSync(t *testing.T) {
 	}
 
 	beforeTree := readDir(t, other, nil)
-	if _, err := e.pull(context.Background(), other, func(c *Config) { c.DryRun = true }); err != nil {
+	if _, err := e.pullCheck(context.Background(), other, nil); err != nil {
 		t.Fatalf("dry run: %v\n%s", err, e.out)
 	}
 	sameTrees(t, "after dry run", readDir(t, other, nil), beforeTree)
@@ -584,7 +641,7 @@ func (p *dirPhone) RemoveEmptyDirs(_ context.Context, rels []string) error {
 	return nil
 }
 
-func (e *env) phone(ctx context.Context, dev phoneDevice, change func(*Config)) error {
+func (e *env) phoneCheck(ctx context.Context, dev phoneDevice, change func(*Config)) error {
 	cfg := e.cfg
 	cfg.Mode, cfg.Source, cfg.RemoteName, cfg.PhoneDir = "phone", e.src, "UpdateMusic", "/sdcard/UpdateMusic"
 	if change != nil {
@@ -594,6 +651,26 @@ func (e *env) phone(ctx context.Context, dev phoneDevice, change func(*Config)) 
 	newPhoneDevice = func(Config) (phoneDevice, error) { return dev, nil }
 	defer func() { newPhoneDevice = old }()
 	return Phone(ctx, cfg, term.NewPlain(e.out))
+}
+
+func (e *env) phone(ctx context.Context, dev phoneDevice, change func(*Config)) error {
+	err := e.phoneCheck(ctx, dev, change)
+	p := e.planFor("phone", e.src)
+	if p == nil || (err != nil && !errors.Is(err, ErrProblems)) {
+		return err
+	}
+	checkErr := err
+	err = e.phoneCheck(ctx, dev, func(c *Config) {
+		if change != nil {
+			change(c)
+		}
+		c.applying = p
+	})
+	os.Remove(p.path)
+	if err == nil {
+		err = checkErr // conflicts found by the check
+	}
+	return err
 }
 
 func testPhoneFollowsDrive(t *testing.T, dev func(root string) phoneDevice) {
@@ -614,7 +691,7 @@ func testPhoneFollowsDrive(t *testing.T, dev func(root string) phoneDevice) {
 	}
 	phone := dev(phoneDir)
 	before := readDir(t, phoneDir, nil)
-	if err := e.phone(context.Background(), phone, func(c *Config) { c.DryRun = true }); err != nil {
+	if err := e.phoneCheck(context.Background(), phone, nil); err != nil && !errors.Is(err, ErrProblems) { // top.mp3 is a conflict
 		t.Fatalf("dry run: %v\n%s", err, e.out)
 	}
 	sameTrees(t, "phone after dry run", readDir(t, phoneDir, nil), before)
@@ -744,8 +821,8 @@ func TestNestedDriveFolder(t *testing.T) {
 	sameTrees(t, "Drive", e.fd.treePath(t, "Work", "Backups", "UpdateMusic"), readDir(t, e.src, e.cfg.Exclude))
 
 	other := filepath.Join(t.TempDir(), "UpdateMusic")
-	if _, err := e.download(context.Background(), other, func(c *Config) {
-		c.Mode, c.Pull, c.RemoteName = "pull", true, "Work/Backups/UpdateMusic"
+	if _, err := e.pull(context.Background(), other, func(c *Config) {
+		c.RemoteName = "Work/Backups/UpdateMusic"
 	}); err != nil {
 		t.Fatalf("%v\n%s", err, e.out)
 	}

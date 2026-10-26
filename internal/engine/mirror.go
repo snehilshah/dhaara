@@ -122,13 +122,8 @@ func planMirror(remote map[string]remoteFile, local map[string]mirrorLocal, md5 
 }
 
 // printMirrorPlan shows the plan; fetchVerb is "download" or "copy to the phone".
-func printMirrorPlan(ui *term.Console, p mirrorPlan, dry bool, fetchVerb, where string) {
-	would := func(s string) string {
-		if dry {
-			return "would " + s
-		}
-		return s
-	}
+func printMirrorPlan(ui *term.Console, p mirrorPlan, fetchVerb, where string) {
+	would := func(s string) string { return s }
 	list := func(title string, lines []string) {
 		if len(lines) == 0 {
 			return

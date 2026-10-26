@@ -74,7 +74,8 @@ func fileExists(p string) bool {
 }
 
 // Phone makes the phone folder cfg.PhoneDir follow the Drive folder over
-// adb, copying files from the local folder cfg.Source.
+// adb, copying files from the local folder cfg.Source. The check saves a
+// plan and changes nothing; Apply carries it out.
 func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 	from, err := filepath.Abs(cfg.Source)
 	if err != nil {
@@ -169,10 +170,6 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 	}
 
 	plan := planMirror(remote, local, md5s, removed, false)
-	printMirrorPlan(ui, plan, cfg.DryRun, "copy to the phone", "on the phone")
-	if err := checkMassRemoval(len(plan.remove), len(local), "on the phone", cfg); err != nil {
-		return err
-	}
 
 	// Files for the phone come from the laptop's copy, which must match Drive.
 	lkey := sha256.Sum256([]byte(from + "\x00" + cfg.RemoteName))
@@ -181,8 +178,8 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 		return gdrive.Fatalf("cannot create state folder: %v", err)
 	}
 	defer lst.Flush()
-	var pushes []adb.Push
 	var notReady []string
+	var ready []remoteFile
 	for _, r := range plan.fetch {
 		p := filepath.Join(from, r.Rel)
 		fi, err := os.Stat(p)
@@ -195,21 +192,42 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 			notReady = append(notReady, r.Rel)
 			continue
 		}
-		pushes = append(pushes, adb.Push{Local: p, Rel: r.Rel, MD5: r.MD5})
+		ready = append(ready, r)
 	}
-	if len(notReady) > 0 {
-		ui.Printf("Not copied: %d files on Drive are missing or different in %s (run dhaara sync there first):", len(notReady), from)
-		for i, rel := range notReady {
-			if i == 20 {
-				ui.Printf("  ... and %d more", len(notReady)-20)
-				break
+	plan.fetch = ready
+	var notes []string
+	for _, rel := range notReady {
+		notes = append(notes, fmt.Sprintf("can't copy (missing or different in %s; run dhaara sync there first): %s", from, rel))
+	}
+
+	steps := mirrorSteps(plan, md5s, "copy to the phone", "on the phone")
+	if cfg.applying == nil { // the check: save the plan, change nothing
+		printMirrorPlan(ui, plan, "copy to the phone", "on the phone")
+		if len(notReady) > 0 {
+			ui.Printf("Can't copy: %d files on Drive are missing or different in %s (run dhaara sync there first):", len(notReady), from)
+			for i, rel := range notReady {
+				if i == 20 {
+					ui.Printf("  ... and %d more", len(notReady)-20)
+					break
+				}
+				ui.Printf("  %s", rel)
 			}
-			ui.Printf("  %s", rel)
 		}
+		warnMassRemoval(ui, len(plan.remove), len(local), "on the phone")
+		err := savePlan(cfg, ui, &savedPlan{Kind: "phone", Source: from, RemoteName: cfg.RemoteName, PhoneDir: cfg.PhoneDir,
+			Steps: steps, Conflicts: plan.conflicts, Notes: notes})
+		if err == nil && len(notReady) > 0 {
+			err = ErrProblems
+		}
+		return err
 	}
-	if cfg.DryRun {
-		ui.Println("Dry run: nothing on the phone was changed.")
-		return nil
+	plan = filterMirror(plan, md5s, matchSteps(ui, cfg.applying, steps))
+	if err := checkMassRemoval(len(plan.remove), len(local), "on the phone", cfg); err != nil {
+		return err
+	}
+	var pushes []adb.Push
+	for _, r := range plan.fetch {
+		pushes = append(pushes, adb.Push{Local: filepath.Join(from, r.Rel), Rel: r.Rel, MD5: r.MD5})
 	}
 
 	var problems int
@@ -281,7 +299,7 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 	ui.ClearStatus()
 	ui.Printf("Phone: %d moved, %d removed, %d copied (%s in %s).", len(plan.moves), len(plan.remove),
 		len(pushes), term.Size(done), term.Duration(time.Since(started)))
-	if problems > 0 || len(notReady) > 0 || len(plan.conflicts) > 0 {
+	if problems > 0 {
 		return ErrProblems
 	}
 	ui.Println("The phone's folder matches Drive. Apps that index files (a music player, a gallery) see the changes on their next scan.")

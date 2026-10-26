@@ -53,13 +53,24 @@ main copy; other laptops and an Android phone can follow it without ever
 sending anything back. `DRIVE_FOLDER` is a path from My Drive, like
 `Reports` or `Work/Reports`.
 
-    dhaara sync ~/Reports --dry-run                  # show what sync would do
-    dhaara sync ~/Reports                            # this folder <-> My Drive/Reports
-    dhaara sync ~/Reports --dest-name Work/Reports   # ... or a folder inside Work
-    dhaara pull Work/Reports ~/Reports               # another laptop <- Drive
-    dhaara phone Work/Reports --dry-run              # phone <- Drive, over adb
-    dhaara snapshot Work/Reports                     # full copy on Drive, only when asked
+It works like `apt update` and `apt upgrade`: **checking never changes
+anything**, and changes happen only when you apply them.
 
+    dhaara sync ~/Reports                             # check: this folder <-> My Drive/Reports
+    dhaara pull Work/Reports ~/Reports                # check, on another laptop: Drive -> here
+    dhaara phone Work/Reports                         # check: Drive -> phone, over adb
+    dhaara pending                                    # read every pending change, in full
+    dhaara apply                                      # asks "Apply these changes? [y/N]", then does them
+    dhaara apply --yes                                # ... without asking
+    dhaara snapshot Work/Reports                      # full copy on Drive, only when asked
+
+- A check saves its plan (one per folder, replacing the last one). `apply`
+  reads both sides again and does only the planned steps that still hold
+  exactly (same file, same Drive copy, same MD5). Anything that changed
+  since the check is skipped and listed, and anything new waits for the
+  next check, so nothing happens that you didn't review.
+- `dhaara apply ~/Reports` (or `pending ~/Reports`) handles just that
+  folder's plans.
 - **sync** uploads new and changed files, and moves Drive's copy of anything
   deleted here to Drive's trash. A rename or move here is a move on Drive,
   not a new upload. It also follows changes made on Drive by another
@@ -77,8 +88,8 @@ sending anything back. `DRIVE_FOLDER` is a path from My Drive, like
 - **snapshot** copies the whole Drive folder into `<folder> snapshots/<date>`
   next to it, on Drive itself: nothing is downloaded or written locally. A
   stopped snapshot continues on the next run. It counts against storage.
-- All of them stop before removing more than a quarter of a side's files
-  (at least 20) unless you add `--allow-many-removals`.
+- `apply` stops before removing more than a quarter of a side's files (at
+  least 20) unless you add `--allow-many-removals`; the check warns first.
 - Folders emptied on Drive are left there (dhaara can't see files other
   apps put in them, so it never trashes a folder); pull doesn't recreate
   folders that hold no files.

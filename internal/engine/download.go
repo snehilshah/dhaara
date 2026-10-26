@@ -45,8 +45,9 @@ func (rf remoteFile) local() *LocalFile { return &LocalFile{Rel: rf.Rel, Size: r
 // partSuffix marks unfinished downloads; upload skips these files.
 const partPrefix, partSuffix = ".dhaara-", ".part"
 
-// Download fetches the Drive folder into cfg.Source; with cfg.Pull it also
-// follows the removed list (moves, removals, replaced versions).
+// Download fetches the Drive folder into cfg.Source. With cfg.Pull it is
+// "dhaara pull": the check saves a plan (following the removed list: moves,
+// removals, replaced versions) and changes nothing; Apply carries it out.
 func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummary, error) {
 	var sum DownloadSummary
 	target, err := filepath.Abs(cfg.Source)
@@ -94,9 +95,10 @@ func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummar
 	}
 	defer st.Flush()
 
-	replaceOK := map[string]bool{}
+	// pull: follow the removed list first; then fetch only what the plan allows.
+	replaceOK, allowed, notApplied := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	if cfg.Pull {
-		done, err := pullRemovalsAndMoves(ctx, cfg, ui, d, st, target, rootID, files, replaceOK)
+		done, err := pullRemovalsAndMoves(ctx, cfg, ui, d, st, target, rootID, files, replaceOK, allowed)
 		if err != nil || done {
 			return sum, err
 		}
@@ -110,6 +112,9 @@ func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummar
 		path := filepath.Join(target, rf.Rel)
 		fi, err := os.Lstat(path)
 		switch {
+		case errors.Is(err, os.ErrNotExist) && cfg.Pull && !allowed[rf.Rel]:
+			notApplied[rf.Rel] = true // not in the reviewed plan
+			continue
 		case errors.Is(err, os.ErrNotExist):
 			todo = append(todo, rf)
 			need += rf.Size
@@ -205,6 +210,9 @@ func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummar
 	ui.Println("Verifying every local file against Drive (size + MD5 checksum)...")
 	var bad []string
 	for _, rf := range files {
+		if notApplied[rf.Rel] {
+			continue
+		}
 		path := filepath.Join(target, rf.Rel)
 		fi, err := os.Lstat(path)
 		if err != nil || !fi.Mode().IsRegular() {
@@ -237,7 +245,11 @@ func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummar
 		return sum, ErrProblems
 	}
 	sum.Verified = true
-	ui.Printf("VERIFIED: all %d files are here and match Drive exactly.", len(files))
+	if len(notApplied) > 0 {
+		ui.Printf("VERIFIED: the %d files the plan covers are here and match Drive exactly.", len(files)-len(notApplied))
+	} else {
+		ui.Printf("VERIFIED: all %d files are here and match Drive exactly.", len(files))
+	}
 	if sum.Failed > 0 {
 		return sum, ErrProblems
 	}

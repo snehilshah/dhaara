@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -43,12 +44,18 @@ const (
 	exitStopped  = 130
 )
 
-const usageText = `dhaara: keep a folder in Google Drive, with resume and checksum verification.
+const usageText = `dhaara: keep a folder in step between computers, Google Drive and a phone.
 
-Usage:
+Check for changes (like apt update; these change nothing, they save a plan):
   dhaara sync [options] FOLDER                         two-way: this folder <-> Drive
   dhaara pull [options] DRIVE_FOLDER [LOCAL_FOLDER]    Drive -> this laptop, following removals
   dhaara phone [options] DRIVE_FOLDER [LOCAL_FOLDER]   Drive -> phone over adb, data from LOCAL_FOLDER
+
+Review and carry out the plans (like apt upgrade):
+  dhaara pending [FOLDER]                              show what's waiting, in full
+  dhaara apply [options] [FOLDER]                      ask, then make exactly those changes
+
+Direct commands:
   dhaara snapshot [options] DRIVE_FOLDER               full copy on Drive, made on Drive
   dhaara [upload] [options] FOLDER                     add and update only, never removes
   dhaara download [options] DRIVE_FOLDER [LOCAL_FOLDER]
@@ -57,7 +64,9 @@ DRIVE_FOLDER is a path from My Drive, like "Reports" or "Work/Reports". By
 default sync and upload use the local folder's name at the top of My Drive.
 
 Examples:
-  dhaara sync ~/Reports --dry-run                    show what sync would do
+  dhaara sync ~/Reports                              check what differs (changes nothing)
+  dhaara pending                                     read the plan
+  dhaara apply                                       confirm and carry it out
   dhaara sync ~/Reports --dest-name Work/Reports     sync with a folder inside Work
   dhaara pull Work/Reports ~/Reports                 on another laptop
   dhaara phone Work/Reports                          into /sdcard/Reports, files from ~/Reports
@@ -109,7 +118,12 @@ func realMain(args []string) int {
 		os.Exit(exitStopped)
 	}()
 
-	if !cfg.NoInhibit && !cfg.VerifyOnly && !cfg.DryRun {
+	if cfg.Mode == "apply" && cfg.Confirm == nil && !cfg.Yes {
+		ui.Println("ERROR: not running in a terminal, so dhaara can't ask before applying. Add --yes to apply without asking.")
+		return exitFatal
+	}
+	changes := cfg.Mode == "apply" || cfg.Mode == "upload" || cfg.Mode == "download" || cfg.Mode == "snapshot"
+	if changes && !cfg.NoInhibit && !cfg.VerifyOnly && !cfg.DryRun {
 		release := platform.InhibitSleep()
 		defer release()
 	}
@@ -123,6 +137,10 @@ func realMain(args []string) int {
 		err = engine.Snapshot(ctx, cfg, ui)
 	case "phone":
 		err = engine.Phone(ctx, cfg, ui)
+	case "pending":
+		err = engine.Pending(ctx, cfg, ui)
+	case "apply":
+		err = engine.Apply(ctx, cfg, ui)
 	default:
 		_, err = engine.Upload(ctx, cfg, ui)
 	}
@@ -170,7 +188,7 @@ func parseFlags(args []string, stderr io.Writer) (engine.Config, error) {
 
 	if len(args) > 0 {
 		switch args[0] {
-		case "upload", "download", "sync", "pull", "snapshot", "phone":
+		case "upload", "download", "sync", "pull", "snapshot", "phone", "pending", "apply":
 			cfg.Mode = args[0]
 			args = args[1:]
 		}
@@ -185,10 +203,11 @@ func parseFlags(args []string, stderr io.Writer) (engine.Config, error) {
 	fs.IntVar(&cfg.Workers, "workers", 3, "files transferred at the same time, 1-8")
 	chunkMB := fs.Int("chunk-mb", 8, "upload, sync: chunk size in MiB, 1-256; smaller files go up in a single request")
 	fs.BoolVar(&cfg.VerifyOnly, "verify-only", false, "upload: change nothing; check Drive against the local folder")
-	fs.BoolVar(&cfg.DryRun, "dry-run", false, "change nothing; show what would be done")
+	fs.BoolVar(&cfg.DryRun, "dry-run", false, "upload, download, snapshot: change nothing; show what would be done")
+	fs.BoolVar(&cfg.Yes, "yes", false, "apply: don't ask before making the changes")
 	fs.BoolVar(&cfg.Overwrite, "overwrite", false, "download, pull: replace local files that differ from Drive")
 	fs.BoolVar(&cfg.NoInhibit, "no-inhibit", false, "let the laptop sleep during the transfer")
-	fs.BoolVar(&cfg.AllowManyRemovals, "allow-many-removals", false, "sync, pull, phone: allow removing more than a quarter of the files")
+	fs.BoolVar(&cfg.AllowManyRemovals, "allow-many-removals", false, "apply: allow removing more than a quarter of a side's files")
 	fs.Func("exclude", "leave out files matching this pattern (repeatable; see above)", func(v string) error {
 		cfg.Exclude = append(cfg.Exclude, v)
 		return nil
@@ -214,12 +233,17 @@ func parseFlags(args []string, stderr io.Writer) (engine.Config, error) {
 
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if term.IsTerminal(os.Stdin) {
+		cfg.Confirm = askYesNo
+	}
 	allowed := map[string][]string{ // options that only some commands take
 		"dest-name":           {"upload", "sync"},
 		"chunk-mb":            {"upload", "sync"},
 		"verify-only":         {"upload"},
 		"overwrite":           {"download", "pull"},
-		"allow-many-removals": {"sync", "pull", "phone"},
+		"allow-many-removals": {"apply"},
+		"yes":                 {"apply"},
+		"dry-run":             {"upload", "download", "snapshot"},
 		"phone-dir":           {"phone"},
 		"adb":                 {"phone"},
 	}
@@ -246,6 +270,14 @@ func parseFlags(args []string, stderr io.Writer) (engine.Config, error) {
 		}
 		if cfg.Mode == "phone" && cfg.PhoneDir == "" {
 			cfg.PhoneDir = "/sdcard/" + path.Base(strings.Trim(cfg.RemoteName, "/"))
+		}
+	case "pending", "apply":
+		if len(positional) > 1 {
+			fs.Usage()
+			return cfg, fmt.Errorf("usage: dhaara %s [FOLDER]", cfg.Mode)
+		}
+		if len(positional) == 1 {
+			cfg.Source = expandHome(positional[0], home)
 		}
 	case "snapshot":
 		if len(positional) != 1 {
@@ -288,6 +320,17 @@ func parseFlags(args []string, stderr io.Writer) (engine.Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// askYesNo asks on the terminal; only "y" or "yes" counts as yes.
+func askYesNo(prompt string) bool {
+	fmt.Fprint(os.Stderr, prompt)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
 }
 
 // version is the module version "go install ...@v0.0.1" stamps into the

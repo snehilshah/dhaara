@@ -188,7 +188,9 @@ func dropIndexes[T any](items []T, drop map[int]bool) []T {
 	return out
 }
 
-// Sync makes the local folder and the Drive folder the same, both ways.
+// Sync makes the local folder and the Drive folder the same, both ways. The
+// check (cfg.applying unset) saves a plan and changes nothing; Apply
+// carries it out.
 func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error) {
 	var sum SyncSummary
 	src, err := filepath.Abs(cfg.Source)
@@ -265,17 +267,21 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 
 	plan := planSync(base, local, localMD5, remote, removed)
 	sum.InSync, sum.Conflicts = plan.inSync, len(plan.conflicts)
-	printSyncPlan(ui, plan, cfg.DryRun)
+
+	if cfg.applying == nil { // the check: save the plan, change nothing
+		printSyncPlan(ui, plan)
+		finishSync(ui, plan)
+		warnMassRemoval(ui, len(plan.driveTrash), len(remote), "on Drive")
+		warnMassRemoval(ui, len(plan.localTrash), len(local), "here")
+		return sum, savePlan(cfg, ui, &savedPlan{Kind: "sync", Source: src, RemoteName: dest,
+			Steps: syncSteps(plan, localMD5), Conflicts: plan.conflicts})
+	}
+	plan = filterSync(plan, localMD5, matchSteps(ui, cfg.applying, syncSteps(plan, localMD5)))
 	if err := checkMassRemoval(len(plan.driveTrash), len(remote), "on Drive", cfg); err != nil {
 		return sum, err
 	}
 	if err := checkMassRemoval(len(plan.localTrash), len(local), "here", cfg); err != nil {
 		return sum, err
-	}
-
-	if cfg.DryRun {
-		ui.Println("Dry run: nothing was changed.")
-		return sum, nil
 	}
 	if plan.empty() {
 		finishSync(ui, plan)
@@ -466,7 +472,7 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 		sum.Uploaded, sum.Downloaded, sum.MovedOnDrive, sum.MovedHere, sum.TrashedOnDrive, sum.TrashedHere)
 	if len(differ) > 0 {
 		slices.Sort(differ)
-		ui.Printf("NOT IN SYNC: %d files still differ between here and Drive:", len(differ))
+		ui.Printf("Still different between here and Drive: %d files (changes not in the applied plan, or failed above):", len(differ))
 		for i, rel := range differ {
 			if i == 50 {
 				ui.Printf("  ... and %d more (see the log file)", len(differ)-50)
@@ -474,9 +480,12 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 			}
 			ui.Printf("  %s", rel)
 		}
-		slog.Error("not in sync", "files", differ)
-		ui.Println("Run the same command again to retry them.")
-		return sum, ErrProblems
+		slog.Warn("still different", "files", differ)
+		ui.Println("Run dhaara sync again to check them.")
+		if sum.Failed > 0 || sum.Conflicts > 0 {
+			return sum, ErrProblems
+		}
+		return sum, nil
 	}
 	ui.Printf("VERIFIED: here and Drive hold the same %d files.", len(localAfter)-len(plan.conflicts))
 	if sum.Failed > 0 || sum.Conflicts > 0 {
@@ -571,14 +580,9 @@ func saveBase(path string, base map[string]syncEntry) {
 	}
 }
 
-func printSyncPlan(ui *term.Console, p syncPlan, dry bool) {
+func printSyncPlan(ui *term.Console, p syncPlan) {
 	ui.Printf("In sync: %d files.", p.inSync)
-	verb := func(s string) string {
-		if dry {
-			return "would " + s
-		}
-		return s
-	}
+	verb := func(s string) string { return s }
 	section := func(title string, lines []string) {
 		if len(lines) == 0 {
 			return
@@ -695,11 +699,21 @@ func removeEmptyDirs(root string, rels []string) {
 // side's files (at least 20), in case something went badly wrong, unless
 // --allow-many-removals was given.
 func checkMassRemoval(n, total int, where string, cfg Config) error {
-	if cfg.AllowManyRemovals || cfg.DryRun || n < 20 || n*4 <= total {
+	if cfg.AllowManyRemovals || !manyRemovals(n, total) {
 		return nil
 	}
 	return gdrive.Fatalf("this would remove %d of the %d files %s. That's a lot, so nothing was changed. "+
-		"Check the list above; if it's right, run again with --allow-many-removals", n, total, where)
+		"Check it with dhaara pending; if it's right, run dhaara apply --allow-many-removals", n, total, where)
+}
+
+func manyRemovals(n, total int) bool { return n >= 20 && n*4 > total }
+
+// warnMassRemoval tells the user at check time that apply will need
+// --allow-many-removals.
+func warnMassRemoval(ui *term.Console, n, total int, where string) {
+	if manyRemovals(n, total) {
+		ui.Printf("WARNING: this removes %d of the %d files %s. Check the list; apply will need --allow-many-removals.", n, total, where)
+	}
 }
 
 func isFatal(err error) bool {
