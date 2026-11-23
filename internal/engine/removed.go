@@ -145,7 +145,7 @@ func (r *removedList) Save(ctx context.Context) error {
 	data, err := json.MarshalIndent(struct {
 		Note    string         `json:"note"`
 		Removed []removedEntry `json:"removed"`
-	}{"Written by dhaara sync. Devices remove a file only if its path and md5 are listed here.", r.entries}, "", " ")
+	}{"Written by dhaara. Devices remove a file only if its path and md5 are listed here.", r.entries}, "", " ")
 	if err != nil {
 		return err
 	}

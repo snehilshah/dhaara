@@ -46,6 +46,7 @@ func (p Push) Size() int64 {
 // Device is one phone folder reached through adb.
 type Device struct {
 	ADB      string // the adb program
+	Serial   string // which phone, as "adb devices" lists it; "" when only one is connected
 	Root     string // folder on the phone, like /sdcard/Reports
 	PartName string // name for a copy in progress, like ".app-push.part"
 	// IsPart reports whether a file name is a leftover copy in progress;
@@ -53,10 +54,18 @@ type Device struct {
 	IsPart func(name string) bool
 }
 
+// adb runs adb with args, aimed at the chosen phone.
+func (a *Device) adb(ctx context.Context, args ...string) *exec.Cmd {
+	if a.Serial != "" {
+		args = append([]string{"-s", a.Serial}, args...)
+	}
+	return exec.CommandContext(ctx, a.ADB, args...)
+}
+
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 func (a *Device) shell(ctx context.Context, script, stdin string) (string, error) {
-	cmd := exec.CommandContext(ctx, a.ADB, "shell", "-T", script)
+	cmd := a.adb(ctx, "shell", "-T", script)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -67,7 +76,7 @@ func (a *Device) shell(ctx context.Context, script, stdin string) (string, error
 }
 
 func (a *Device) Check(ctx context.Context) error {
-	out, err := exec.CommandContext(ctx, a.ADB, "get-state").CombinedOutput()
+	out, err := a.adb(ctx, "get-state").CombinedOutput()
 	state := strings.TrimSpace(string(out))
 	if err != nil || state != "device" {
 		msg := state
@@ -173,7 +182,7 @@ func (a *Device) Move(ctx context.Context, moves []Move) (map[string]bool, error
 
 func (a *Device) Push(ctx context.Context, p Push) error {
 	part := path.Join(path.Dir(p.Rel), a.PartName)
-	out, err := exec.CommandContext(ctx, a.ADB, "push", p.Local, path.Join(a.Root, part)).CombinedOutput()
+	out, err := a.adb(ctx, "push", p.Local, path.Join(a.Root, part)).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("adb push: %v: %s", err, strings.TrimSpace(string(out)))
 	}

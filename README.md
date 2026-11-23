@@ -3,8 +3,9 @@
 *Dhaara (धारा): a stream, a current; continuous flow, like a river.*
 
 Keep a folder in step between your computers, Google Drive and an Android
-phone: two-way sync, follow-only pull, phone sync over adb, and snapshots
-made on Drive. Transfers resume after Ctrl+C or a dropped connection, and
+phone: name a pairing once, then `dhaara status` and `dhaara apply`.
+Two-way or follow-only per laptop, phones over adb, and snapshots made on
+Drive. Transfers resume after Ctrl+C or a dropped connection, and
 every file is checked by MD5. Go standard library only, no third-party code.
 
 ## Install
@@ -13,7 +14,7 @@ every file is checked by MD5. Go standard library only, no third-party code.
 
 This puts `dhaara` in `$(go env GOPATH)/bin` (usually `~/go/bin`); make sure
 that's on your `PATH` (`dhaara --version` shows the release). Needs Go 1.25 or newer. Linux (it uses `gio trash`
-and `systemd-inhibit` when available); `dhaara phone` also needs `adb`.
+and `systemd-inhibit` when available); phones also need `adb`.
 
 ## Setup (once)
 
@@ -48,92 +49,99 @@ Problems you may hit:
 
 ## Keeping devices in step
 
-One machine (or more) changes the folder and syncs with Drive; Drive is the
-main copy; other laptops and an Android phone can follow it without ever
-sending anything back. `DRIVE_FOLDER` is a path from My Drive, like
-`Reports` or `Work/Reports`.
+A **pairing** names a folder here and a folder on Drive that are kept in
+step, plus any phones that follow Drive. Set it up once on each device;
+after that there are two commands. It works like `apt update` and
+`apt upgrade`: **`status` never changes anything**, and changes happen only
+when you `apply` them.
 
-It works like `apt update` and `apt upgrade`: **checking never changes
-anything**, and changes happen only when you apply them.
+    dhaara add music ~/Music drive:Music            # this laptop: two-way
+    dhaara add music phone:/sdcard/Music            # a phone follows Drive, over adb
+    dhaara status                                   # check everything; changes nothing
+    dhaara apply                                    # check again, show the plan, ask, then do it
 
-    dhaara sync ~/Reports                             # check: this folder <-> My Drive/Reports
-    dhaara pull Work/Reports ~/Reports                # check, on another laptop: Drive -> here
-    dhaara phone Work/Reports                         # check: Drive -> phone, over adb
-    dhaara pending                                    # read every pending change, in full
-    dhaara apply                                      # asks "Apply these changes? [y/N]", then does them
-    dhaara apply --yes                                # ... without asking
-    dhaara snapshot Work/Reports                      # full copy on Drive, only when asked
+On another laptop, which only takes Drive's changes:
 
-### What each command looks at
+    dhaara add music ~/Music drive:Music --follow
+    dhaara status
+    dhaara apply
 
-| Command | First argument | Second argument | Changes |
-|---|---|---|---|
-| `sync FOLDER` | the local folder | (none; `--dest-name` picks the Drive folder, default its name at the top of My Drive) | Drive |
-| `pull DRIVE_FOLDER [LOCAL]` | the Drive folder to follow | the local folder (default `~/<last part>`) | this computer |
-| `phone DRIVE_FOLDER [LOCAL]` | the Drive folder the phone should match | where the files come from (default `~/<last part>`) | the phone, in `--phone-dir` (default `/sdcard/<last part>`) |
+A Drive path starts at My Drive, like `Music` or `Work/Reports`.
 
-So `dhaara phone Work/Reports` makes `/sdcard/Reports` match Drive's
-`Work/Reports`, sending the files from `~/Reports` over USB or wireless
-debugging. Nothing is downloaded from Drive.
+### The places in a pairing
 
-### Plans: check, pending, apply
+| Place | Role | What changes there |
+|---|---|---|
+| the folder here, two-way (default) | its changes go to Drive, and Drive's changes come back | here and Drive |
+| the folder here, `--follow` | only takes Drive's changes, never sends any | here |
+| `phone:/sdcard/...` | follows Drive; its files come from the folder here, over USB or wireless debugging, so nothing is downloaded | the phone |
 
-- A check saves a plan. There's one plan per kind and set of folders (sync
-  `~/Reports`, phone `Work/Reports` into `/sdcard/Reports`, ...), and a new
-  check of the same replaces the old one. Plans live in
-  `~/.local/state/dhaara/plans/`.
-- `pending` shows every plan in full. `apply` goes through them oldest first,
-  shows each one and asks `[y/N]` **for each plan separately**. Saying no
-  skips that plan and keeps it pending; the others still run. `--yes`
-  applies them all without asking.
-- `apply` reads both sides again and does only the planned steps that still
-  hold exactly (same file, same Drive copy, same MD5). Anything that changed
-  since the check is skipped and listed, and anything new waits for the
-  next check, so nothing happens that you didn't review.
-- Order matters when plans depend on each other. A phone or pull plan
-  checked before a sync was applied doesn't know what that sync changed on
-  Drive, so its new steps are skipped as "appeared since the check". Apply
-  the sync, then check the phone or the other laptop again.
-- `dhaara apply ~/Reports` (or `pending ~/Reports`) handles only the plans
-  whose local folder is `~/Reports`. A sync and a phone plan that both use
-  `~/Reports` both match; answer no to the one you want to leave.
-- `apply` stops before removing more than a quarter of a side's files (at
-  least 20) unless you add `--allow-many-removals`; the check warns first.
+- Pairings are stored per device in `~/.config/dhaara/config.json`.
+- `--exclude PATTERN` when adding sets exclusions for that pairing only.
+- `--serial` picks a phone when several are connected (as `adb devices` lists them).
+- `dhaara forget NAME` (or `forget NAME phone:/sdcard/...`) takes it out
+  again. No files are touched, and adding the same folders later carries on
+  where they were.
+- A pairing remembers which Drive folder it was set up with. If the path
+  ever leads to a different folder (another folder with the same name),
+  `status` stops and says so.
 
-### sync
+### status and apply
+
+- `status` checks every place of every pairing (or `status NAME`, one) and
+  shows what would change. It always lists removals; `status -v` lists
+  every step and how each place was checked.
+- A phone that isn't connected is listed as "not checked" and skipped.
+- The plan has stages, run in this order: here and Drive first, then each
+  phone. The phone is planned against Drive *as the first stage will leave
+  it*, so one `apply` brings everything in step.
+- `apply` checks again, shows the fresh plan (marking anything new since
+  the last `status`), and asks once per pairing: `Apply these changes?
+  [y/N]`. Saying no keeps the plan pending.
+- `apply --yes` doesn't check again or ask. It does exactly what the last
+  `status` saved: each stage reads both sides again and does only the steps
+  that still hold exactly (same file, same Drive copy, same MD5). Anything
+  that changed since is skipped and listed, and anything new waits for the
+  next `status`.
+- `apply` stops before it starts if any stage would remove more than a
+  quarter of a place's files (at least 20), unless you add
+  `--allow-many-removals`.
+- `status --exit-code` exits with 3 when changes are pending (for scripts).
+
+### Two-way: here and Drive
 
 Uploads new and changed files, and moves Drive's copy of anything deleted
 here to Drive's trash. A rename or move here is a move on Drive, not a new
-upload. It also follows changes made on Drive by another machine's sync. A
-file changed on both sides is a conflict: neither copy is touched.
-Everything it takes off Drive is first written to a **removed list** (path
-and MD5 of each old file) in `dhaara data/` in My Drive. That list is how
-pull and phone know a removal was meant.
+upload. It also takes changes made on Drive by another two-way laptop. A file
+changed on both sides is a conflict: neither copy is touched. Everything it
+takes off Drive is first written to a **removed list** (path and MD5 of
+each old file) in `dhaara data/` in My Drive. That list is how followers
+know a removal was meant.
 
-### pull and phone: following Drive
+### Following Drive: other laptops and phones
 
-Laptops that pull and phones only take changes from Drive; they never send
-anything back. For each file they hold:
+Follow-only laptops and phones only take changes from Drive; they never
+send anything back. For each file they hold:
 
 | The file there is | What happens |
 |---|---|
 | the same as Drive's | left alone |
 | missing | copied (or moved, if the same contents sit at a path the removed list says was moved away) |
-| different from Drive's | replaced only if that exact old version (path and MD5) is on the removed list; otherwise a conflict, left alone (pull: `--overwrite` replaces it) |
+| different from Drive's | replaced only if that exact old version (path and MD5) is on the removed list; otherwise a conflict, left alone |
 | not on Drive | removed only if that exact file is on the removed list; otherwise it only ever existed there, so it's left alone |
 
-Pull moves removed files to the computer's trash. Phone deletes them, after
-checking the file's MD5 on the phone.
+A follow-only laptop moves removed files to its trash. A phone deletes
+them, after checking the file's MD5 on the phone.
 
-**Where phone gets its files, and the checksum check.** Before sending a
-file, phone works out the MD5 (a fingerprint of the contents) of the copy on
+**Where a phone gets its files, and the checksum check.** Before sending a
+file, dhaara works out the MD5 (a fingerprint of the contents) of the copy on
 this computer and compares it with Drive's. Only a match is sent, so the
 phone gets exactly the version Drive holds. A file that's missing here or
 different (edited after the last sync, or changed on Drive by another
 machine) isn't sent: the check lists it as `can't copy (missing or different
 in ...)` and ends with problems, and the phone's copy, if any, is left as it
-is. Everything else still goes. Fix it by running `dhaara sync` on this
-folder (and `apply`), then check the phone again.
+is. Everything else still goes. Files the first stage of the same plan
+brings in step (an upload or download here) count as matching.
 
 Each file arrives on the phone under a temporary name (`.dhaara-push.part`),
 its MD5 is checked there, and only then is it renamed into place, so a
@@ -146,25 +154,24 @@ on Drive itself: nothing is downloaded or written locally. A stopped
 snapshot continues on the next run, and a final pass checks every copy. It
 counts against storage.
 
-A snapshot lists the folder once, then copies file by file. Checking
-(`sync`, `pull`, `phone`, `pending`) while it runs is fine. Changing the
-same Drive folder isn't: `apply`, `upload`, `download` and `snapshot` each
-lock the folder, and a second one stops straight away with "another dhaara
-run is changing the Drive folder …", changing nothing (its plan stays
-pending). Run it again once the first has finished.
+A snapshot lists the folder once, then copies file by file. Running
+`status` while it runs is fine. Changing the same Drive folder isn't:
+`apply`, `upload`, `download` and `snapshot` each lock the folder, and a
+second one stops straight away with "another dhaara run is changing the
+Drive folder …", changing nothing (its plan stays pending). Run it again once the first has finished.
 
 ### Folders
 
 Folders emptied on Drive are left there (dhaara can't see files other apps
-put in them, so it never trashes a folder); pull doesn't recreate folders
-that hold no files.
+put in them, so it never trashes a folder); followers don't recreate
+folders that hold no files.
 
-**Exclusions:** one pattern per line in `~/.config/dhaara/exclude`, plus
-`--exclude PATTERN`. Without a `/` a pattern matches a file or folder name
+**Exclusions:** one pattern per line in `~/.config/dhaara/exclude` (every
+folder), plus `--exclude PATTERN` when adding a pairing (that pairing only)
+or for a one-off command. Without a `/` a pattern matches a file or folder name
 anywhere (`*.tmp`, `node_modules`); with a `/` it matches the path from the
 top (`build/`, `projects/*/cache`). Excluded files are left alone
-everywhere: never uploaded, downloaded, copied to the phone or removed. The
-same exclude file applies to every folder.
+everywhere: never uploaded, downloaded, copied to the phone or removed.
 
 **What dhaara can see:** it asks only for the `drive.file` permission, so
 it sees only files it uploaded itself. Files added to a synced folder from
@@ -173,9 +180,10 @@ are never downloaded or removed.
 
 ## Other commands
 
-    dhaara ~/Reports                 # upload, or continue an earlier upload
-    dhaara ~/Reports --dry-run       # show what would be uploaded
-    dhaara ~/Reports --verify-only   # check Drive against the local folder
+    dhaara upload ~/Reports                 # upload, or continue an earlier upload
+    dhaara upload ~/Reports --dry-run       # show what would be uploaded
+    dhaara upload ~/Reports --verify-only   # check Drive against the local folder
+    dhaara snapshot Music                   # full copy on Drive (see above)
 
 Download (dhaara can only download folders it uploaded):
 
@@ -190,7 +198,7 @@ Local files that differ from Drive are left alone unless you add
 
 Uploading again adds new files and replaces changed ones (the old copy goes to
 Drive's trash). It does not remove files from Drive that you deleted or
-renamed locally; `dhaara sync` does.
+renamed locally; a two-way pairing does.
 
 Run the same command again at any time; finished files are skipped and
 half-uploaded files continue where they stopped. Options: `dhaara --help`.
@@ -219,7 +227,7 @@ Files: sign-in in `~/.config/dhaara/`, resume data and logs in
 ## Code layout
 
     cmd/dhaara/          the command: options, help, exit codes
-    internal/engine/     upload, download, sync, pull, phone, snapshot (and their tests)
+    internal/engine/     pairings (status, apply), sync, follow, phone, upload, download, snapshot
     internal/gdrive/     Google sign-in, Drive API calls, retries and pacing
     internal/adb/        file operations on an Android phone through adb
     internal/exclude/    exclusion patterns

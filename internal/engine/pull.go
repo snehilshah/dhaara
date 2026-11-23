@@ -50,7 +50,7 @@ func pullRemovalsAndMoves(ctx context.Context, cfg Config, ui *term.Console, d *
 		printMirrorPlan(ui, plan, "download", "here")
 		warnMassRemoval(ui, len(plan.remove), len(local), "here")
 		return true, savePlan(cfg, ui, &savedPlan{Kind: "pull", Source: target, RemoteName: cfg.RemoteName,
-			Steps: mirrorSteps(plan, md5s, "here"), Conflicts: plan.conflicts})
+			Steps: mirrorSteps(plan, md5s, "here"), Conflicts: plan.conflicts, Totals: map[string]int{"here": len(local)}})
 	}
 	plan = filterMirror(plan, md5s, "here", matchSteps(ui, cfg.applying, mirrorSteps(plan, md5s, "here")))
 	if err := checkMassRemoval(len(plan.remove), len(local), "here", cfg); err != nil {

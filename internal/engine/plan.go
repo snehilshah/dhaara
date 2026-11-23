@@ -54,14 +54,16 @@ func step(s planStep) planStep {
 }
 
 type savedPlan struct {
-	Kind       string     `json:"kind"` // sync, pull, phone
-	Created    time.Time  `json:"created"`
-	Source     string     `json:"source"` // local folder
-	RemoteName string     `json:"remote"` // Drive folder path
-	PhoneDir   string     `json:"phone_dir,omitempty"`
-	Steps      []planStep `json:"steps"`
-	Conflicts  []string   `json:"conflicts,omitempty"`
-	Notes      []string   `json:"notes,omitempty"` // things the plan can't do, for the user
+	Kind        string         `json:"kind"` // sync, pull, phone
+	Created     time.Time      `json:"created"`
+	Source      string         `json:"source"` // local folder
+	RemoteName  string         `json:"remote"` // Drive folder path
+	PhoneDir    string         `json:"phone_dir,omitempty"`
+	PhoneSerial string         `json:"phone_serial,omitempty"`
+	Totals      map[string]int `json:"totals,omitempty"` // files on each side at the check (drive, here, phone)
+	Steps       []planStep     `json:"steps"`
+	Conflicts   []string       `json:"conflicts,omitempty"`
+	Notes       []string       `json:"notes,omitempty"` // things the plan can't do, for the user
 
 	path string
 }
@@ -106,6 +108,13 @@ func planPath(cfg Config, kind, source, remote, phoneDir string) string {
 // tells the user what is pending. An empty plan removes any old one.
 func savePlan(cfg Config, ui *term.Console, p *savedPlan) error {
 	p.Created = time.Now().UTC().Truncate(time.Second)
+	if cfg.collect != nil { // a stage of a pairing: Status keeps it
+		*cfg.collect = *p
+		if len(p.Conflicts) > 0 {
+			return ErrProblems
+		}
+		return nil
+	}
 	path := planPath(cfg, p.Kind, p.Source, p.RemoteName, p.PhoneDir)
 	if len(p.Steps) == 0 {
 		os.Remove(path)
@@ -120,7 +129,7 @@ func savePlan(cfg Config, ui *term.Console, p *savedPlan) error {
 		return gdrive.Fatalf("cannot save the plan: %v", err)
 	}
 	ui.Printf("Pending: %s.", stepCounts(p.Steps))
-	ui.Println("Nothing was changed. Review with: dhaara pending    Apply with: dhaara apply")
+	ui.Println("Nothing was changed. Review with: dhaara status -v    Apply with: dhaara apply")
 	if len(p.Conflicts) > 0 {
 		return ErrProblems // the plan is saved, but the conflicts need you
 	}
@@ -209,7 +218,7 @@ func Pending(ctx context.Context, cfg Config, ui *term.Console) error {
 		return err
 	}
 	if len(plans) == 0 {
-		ui.Println("Nothing pending. Run dhaara sync, pull or phone to check for changes.")
+		ui.Println("Nothing pending. Run dhaara status to check for changes.")
 		return nil
 	}
 	for i, p := range plans {
@@ -246,7 +255,7 @@ func Apply(ctx context.Context, cfg Config, ui *term.Console) error {
 		return err
 	}
 	if len(plans) == 0 {
-		ui.Println("Nothing to apply. Run dhaara sync, pull or phone first.")
+		ui.Println("Nothing to apply. Run dhaara status first.")
 		return nil
 	}
 	var problems bool
@@ -267,7 +276,7 @@ func Apply(ctx context.Context, cfg Config, ui *term.Console) error {
 			}
 		}
 		if len(p.Steps) > shown {
-			ui.Printf("    ... and %d more (see dhaara pending)", len(p.Steps)-shown)
+			ui.Printf("    ... and %d more (see dhaara status -v)", len(p.Steps)-shown)
 		}
 		if !cfg.Yes {
 			if cfg.Confirm == nil {
@@ -279,25 +288,7 @@ func Apply(ctx context.Context, cfg Config, ui *term.Console) error {
 			}
 		}
 
-		release, err := lockFolder(cfg, p.RemoteName, "apply")
-		if err != nil {
-			return err
-		}
-		run := cfg
-		run.Mode, run.Source, run.RemoteName, run.PhoneDir = p.Kind, p.Source, p.RemoteName, p.PhoneDir
-		run.applying = p
-		switch p.Kind {
-		case "sync":
-			_, err = Sync(ctx, run, ui)
-		case "pull":
-			run.Download, run.Pull = true, true
-			_, err = Download(ctx, run, ui)
-		case "phone":
-			err = Phone(ctx, run, ui)
-		default:
-			err = fmt.Errorf("unknown plan kind %q in %s", p.Kind, p.path)
-		}
-		release()
+		err = runStage(ctx, cfg, ui, p)
 		if ctx.Err() != nil {
 			return ctx.Err() // keep the plan: apply again to continue
 		}

@@ -56,7 +56,9 @@ var newPhoneDevice = func(cfg Config) (phoneDevice, error) {
 	if adbPath == "" {
 		return nil, gdrive.Fatalf("adb not found. Install it (sudo apt install adb) or pass --adb /path/to/adb")
 	}
-	return newADBDevice(adbPath, cfg.PhoneDir), nil
+	dev := newADBDevice(adbPath, cfg.PhoneDir)
+	dev.Serial = cfg.PhoneSerial
+	return dev, nil
 }
 
 // newADBDevice makes the real phone, naming copies in progress like
@@ -92,26 +94,32 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 		return gdrive.Fatalf("%v", err)
 	}
 
-	d, _, err := connect(ctx, cfg, ui)
-	if err != nil {
-		return err
-	}
-	ui.Printf("Reading the Drive folder %q...", cfg.RemoteName)
-	ls := d.NewListings()
-	rootID, _, err := gdrive.ResolveFolder(ctx, ls, cfg.RemoteName, false)
-	if err != nil {
-		return err
-	}
-	if rootID == "" {
-		return gdrive.Fatalf("no folder named %q found in your Drive. dhaara can only see folders it uploaded itself", cfg.RemoteName)
-	}
-	remote, _, _, err := readRemote(ctx, ls, rootID, cfg.Exclude, ui)
-	if err != nil {
-		return err
-	}
-	removed, err := loadRemoved(ctx, d, ls, cfg.RemoteName, rootID)
-	if err != nil {
-		return err
+	var remote map[string]remoteFile
+	var removed *removedList
+	if cfg.basedOn != nil { // planned against Drive as an earlier stage will leave it
+		remote = cfg.basedOn.files
+		removed = &removedList{entries: cfg.basedOn.removed}
+		ui.Printf("On Drive after the earlier stage: %d files.", len(remote))
+	} else {
+		d, _, err := connect(ctx, cfg, ui)
+		if err != nil {
+			return err
+		}
+		ui.Printf("Reading the Drive folder %q...", cfg.RemoteName)
+		ls := d.NewListings()
+		rootID, _, err := gdrive.ResolveFolder(ctx, ls, cfg.RemoteName, false)
+		if err != nil {
+			return err
+		}
+		if rootID == "" {
+			return gdrive.Fatalf("no folder named %q found in your Drive. dhaara can only see folders it uploaded itself", cfg.RemoteName)
+		}
+		if remote, _, _, err = readRemote(ctx, ls, rootID, cfg.Exclude, ui); err != nil {
+			return err
+		}
+		if removed, err = loadRemoved(ctx, d, ls, cfg.RemoteName, rootID); err != nil {
+			return err
+		}
 	}
 
 	ui.Printf("Reading the phone's folder %s...", cfg.PhoneDir)
@@ -182,6 +190,10 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 	var notReady []string
 	var ready []remoteFile
 	for _, r := range plan.fetch {
+		if cfg.readyAfter[r.Rel] { // the earlier stage brings this copy in step with Drive
+			ready = append(ready, r)
+			continue
+		}
 		p := filepath.Join(from, r.Rel)
 		fi, err := os.Stat(p)
 		if err != nil || !fi.Mode().IsRegular() || fi.Size() != r.Size {
@@ -198,14 +210,14 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 	plan.fetch = ready
 	var notes []string
 	for _, rel := range notReady {
-		notes = append(notes, fmt.Sprintf("can't copy (missing or different in %s; run dhaara sync there first): %s", from, rel))
+		notes = append(notes, fmt.Sprintf("can't copy (missing or different in %s; the first stage of dhaara apply updates it, or fix it there): %s", from, rel))
 	}
 
 	steps := mirrorSteps(plan, md5s, "phone")
 	if cfg.applying == nil { // the check: save the plan, change nothing
 		printMirrorPlan(ui, plan, "copy to the phone", "on the phone")
 		if len(notReady) > 0 {
-			ui.Printf("Can't copy: %d files on Drive are missing or different in %s (run dhaara sync there first):", len(notReady), from)
+			ui.Printf("Can't copy: %d files on Drive are missing or different in %s (a two-way pairing there sends them to Drive first):", len(notReady), from)
 			for i, rel := range notReady {
 				if i == 20 {
 					ui.Printf("  ... and %d more", len(notReady)-20)
@@ -216,7 +228,8 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 		}
 		warnMassRemoval(ui, len(plan.remove), len(local), "on the phone")
 		err := savePlan(cfg, ui, &savedPlan{Kind: "phone", Source: from, RemoteName: cfg.RemoteName, PhoneDir: cfg.PhoneDir,
-			Steps: steps, Conflicts: plan.conflicts, Notes: notes})
+			PhoneSerial: cfg.PhoneSerial, Steps: steps, Conflicts: plan.conflicts, Notes: notes,
+			Totals: map[string]int{"phone": len(local)}})
 		if err == nil && len(notReady) > 0 {
 			err = ErrProblems
 		}

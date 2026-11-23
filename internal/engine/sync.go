@@ -274,8 +274,12 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 		finishSync(ui, plan)
 		warnMassRemoval(ui, len(plan.driveTrash), len(remote), "on Drive")
 		warnMassRemoval(ui, len(plan.localTrash), len(local), "here")
+		if cfg.predict != nil {
+			*cfg.predict = predictDrive(plan, localMD5, remote, removed)
+		}
 		return sum, savePlan(cfg, ui, &savedPlan{Kind: "sync", Source: src, RemoteName: dest,
-			Steps: syncSteps(plan, localMD5), Conflicts: plan.conflicts})
+			Steps: syncSteps(plan, localMD5), Conflicts: plan.conflicts,
+			Totals: map[string]int{"drive": len(remote), "here": len(local)}})
 	}
 	plan = filterSync(plan, localMD5, matchSteps(ui, cfg.applying, syncSteps(plan, localMD5)))
 	if cfg.predict != nil {
@@ -473,7 +477,7 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 			ui.Printf("  %s", rel)
 		}
 		slog.Warn("still different", "files", differ)
-		ui.Println("Run dhaara sync again to check them.")
+		ui.Println("Run dhaara status again to check them.")
 		if sum.Failed > 0 || sum.Conflicts > 0 {
 			return sum, ErrProblems
 		}
@@ -695,7 +699,7 @@ func checkMassRemoval(n, total int, where string, cfg Config) error {
 		return nil
 	}
 	return gdrive.Fatalf("this would remove %d of the %d files %s. That's a lot, so nothing was changed. "+
-		"Check it with dhaara pending; if it's right, run dhaara apply --allow-many-removals", n, total, where)
+		"Check it with dhaara status -v; if it's right, run dhaara apply --allow-many-removals", n, total, where)
 }
 
 func manyRemovals(n, total int) bool { return n >= 20 && n*4 > total }

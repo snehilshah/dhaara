@@ -387,3 +387,9 @@ func TestLongRetriesAreShown(t *testing.T) {
 		t.Error("no retry notice was printed")
 	}
 }
+
+func (l *lockedBuffer) Reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.b.Reset()
+}

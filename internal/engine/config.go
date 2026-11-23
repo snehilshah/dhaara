@@ -35,12 +35,18 @@ type Config struct {
 	AllowManyRemovals bool
 	Trash             func(path string) error  // moves a local file to the trash
 	PhoneDir          string                   // phone: the folder on the phone
+	PhoneSerial       string                   // phone: which phone ("" when only one is connected)
 	ADB               string                   // phone: the adb program
 	Yes               bool                     // apply: don't ask
 	Confirm           func(prompt string) bool // apply: ask the user; nil when there's no terminal
 
 	applying *savedPlan       // set by Apply: carry out this plan instead of saving one
-	predict  *drivePrediction // tests: set to receive what a sync apply expects Drive to hold after it
+	predict  *drivePrediction // set to receive what the sync plan leaves on Drive (check and apply)
+
+	// Set by Status, which runs the stages of a pairing one after another:
+	collect    *savedPlan       // receive the check's plan instead of saving it
+	basedOn    *drivePrediction // phone check: plan against this Drive instead of reading it
+	readyAfter map[string]bool  // phone check: paths the earlier stage brings in step with Drive here
 }
 
 // freeSpace is a variable so tests can pretend the disk is full.

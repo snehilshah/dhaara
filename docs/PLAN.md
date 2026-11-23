@@ -44,6 +44,18 @@ folder ID, its role, its phones (dir, serial, role) and excludes. Existing
 state (`synced.json`, `md5.json`) is migrated so nothing is re-hashed and
 first-sync rules don't return.
 
+**As built in phase 2 (2026-11-23):**
+- No migration was needed. State stays keyed by the local and Drive paths
+  (and the phone folder), so a pairing over folders that already synced
+  carries on. Tested, and checked live on the music folder: status took
+  10.9 s, with no first sync.
+- `upload`, `download` and `snapshot` stay until `copy` (phase 3) and
+  `backup` (phase 4) replace them.
+- `sync`, `pull`, `phone` and `pending` now print what replaces them.
+- A pairing's plan is `~/.local/state/dhaara/plans/pairing-<name>.json`.
+- The phone's base and the conflict details (dates, sizes) moved to
+  phase 4, where `resolve` and the two-way phone use them.
+
 ## Edits on every device
 
 Every place in a pairing remembers the last version it agreed on with the
@@ -195,9 +207,9 @@ Requests for the 51-folder / 2,870-file music folder:
 |---|---|---|
 | 0 | Structured steps, Drive prediction, lock (done 2026-11-23) | |
 | 1 | Parallel listing and per-run cache (done 2026-11-23; the flat index moved to 5) | v0.0.4 |
-| 2 | Config, `add` / `status` / `apply` / `forget`, merged plan, state migration, base per place (phone included), conflicts shown with dates and sizes | v0.1.0 |
+| 2 | Config, `add` / `status` / `apply` / `forget`, merged plan (done 2026-11-23) | v0.1.0 |
 | 3 | `copy`, `ls`, `link`, `share` | |
-| 4 | History, restore points, `restore`, `prune`, `backup --full` skip, `resolve`, phone `--two-way` | v0.2.0 |
+| 4 | History, restore points, `restore`, `prune`, `backup --full` skip, `resolve`, phone `--two-way`, base per phone, conflicts shown with dates and sizes | v0.2.0 |
 | 5 | Flat index and changes feed | |
 | 6 | Streaming: service-account sign-in, `serve`, `playlist` | |
 | 7 | `doctor`, `login`, `--json`, completion, batch requests, phone case-clash warning | |

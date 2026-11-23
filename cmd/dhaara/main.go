@@ -41,44 +41,63 @@ const (
 	exitOK       = 0
 	exitProblems = 1
 	exitFatal    = 2
+	exitPending  = 3 // status --exit-code: changes are waiting
 	exitStopped  = 130
 )
 
 const usageText = `dhaara: keep a folder in step between computers, Google Drive and a phone.
 
-Check for changes (like apt update; these change nothing, they save a plan):
-  dhaara sync [options] FOLDER                         two-way: this folder <-> Drive
-  dhaara pull [options] DRIVE_FOLDER [LOCAL_FOLDER]    Drive -> this laptop, following removals
-  dhaara phone [options] DRIVE_FOLDER [LOCAL_FOLDER]   Drive -> phone over adb, data from LOCAL_FOLDER
+Set up once per device (a "pairing" of a folder here and one on Drive):
+  dhaara add NAME FOLDER drive:PATH            two-way: this folder <-> Drive
+  dhaara add NAME FOLDER drive:PATH --follow   this folder only takes Drive's changes
+  dhaara add NAME phone:/sdcard/PATH           a phone follows Drive (files from FOLDER, over adb)
+  dhaara forget NAME [phone:/sdcard/PATH]      take it out again (touches no files)
 
-Review and carry out the plans (like apt upgrade):
-  dhaara pending [FOLDER]                              show what's waiting, in full
-  dhaara apply [options] [FOLDER]                      ask, then make exactly those changes
+Day to day (like apt update and apt upgrade):
+  dhaara status [NAME]                         check everything; changes nothing
+  dhaara apply [NAME]                          check again, show the plan, ask, then do it
 
-Direct commands:
-  dhaara snapshot [options] DRIVE_FOLDER               full copy on Drive, made on Drive
-  dhaara [upload] [options] FOLDER                     add and update only, never removes
-  dhaara download [options] DRIVE_FOLDER [LOCAL_FOLDER]
+One-off commands:
+  dhaara upload [options] FOLDER               add and update on Drive, never removes
+  dhaara download [options] DRIVE_PATH [FOLDER]
+  dhaara snapshot [options] DRIVE_PATH         full copy, made on Drive
 
-DRIVE_FOLDER is a path from My Drive, like "Reports" or "Work/Reports". By
-default sync and upload use the local folder's name at the top of My Drive.
+A Drive path starts at My Drive, like "Reports" or "Work/Reports".
 
 Examples:
-  dhaara sync ~/Reports                              check what differs (changes nothing)
-  dhaara pending                                     read the plan
-  dhaara apply                                       confirm and carry it out
-  dhaara sync ~/Reports --dest-name Work/Reports     sync with a folder inside Work
-  dhaara pull Work/Reports ~/Reports                 on another laptop
-  dhaara phone Work/Reports                          into /sdcard/Reports, files from ~/Reports
-  dhaara snapshot Work/Reports                       copy into "Work/Reports snapshots/<date>"
+  dhaara add music ~/Music drive:Music
+  dhaara add music phone:/sdcard/Music
+  dhaara status                                what would change, everywhere
+  dhaara status -v                             ... every step, and how it was worked out
+  dhaara apply                                 carry it out: Drive first, then the phone
+  dhaara apply --yes                           exactly what the last status showed, without asking
 
-Exclusions: one pattern per line in ~/.config/dhaara/exclude, plus --exclude.
+Exclusions: one pattern per line in ~/.config/dhaara/exclude (every folder),
+plus --exclude when adding a pairing (that pairing only) or for one-off commands.
 A pattern without "/" matches a file or folder name anywhere ("*.tmp", "node_modules");
 with "/" it matches the path from the top ("build/", "projects/*/cache").
 Excluded files are left alone everywhere: never sent, fetched or removed.
 
 Options:
 `
+
+// replaced tells users of the old commands what to run now.
+var replaced = map[string]string{
+	"sync":    "dhaara add NAME FOLDER drive:PATH once, then dhaara status and dhaara apply",
+	"pull":    "dhaara add NAME FOLDER drive:PATH --follow once, then dhaara status and dhaara apply",
+	"phone":   "dhaara add NAME phone:/sdcard/PATH once (to a pairing), then dhaara status and dhaara apply",
+	"pending": "dhaara status (or dhaara status -v for every step)",
+}
+
+// command is what the user asked for.
+type command struct {
+	cfg      engine.Config
+	name     string   // pairing name (add, forget, status, apply)
+	args     []string // add, forget: locations
+	verbose  bool
+	exitCode bool
+	add      engine.AddOptions
+}
 
 func main() {
 	os.Exit(realMain(os.Args[1:]))
@@ -89,7 +108,7 @@ func realMain(args []string) int {
 		fmt.Println("dhaara", version())
 		return exitOK
 	}
-	cfg, err := parseFlags(args, os.Stderr)
+	c, err := parseFlags(args, os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		return exitOK
 	}
@@ -97,6 +116,7 @@ func realMain(args []string) int {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		return exitFatal
 	}
+	cfg := c.cfg
 	ui := term.NewConsole(os.Stderr)
 
 	logPath, closeLog, err := setupLog(cfg.StateDir, cfg.Mode)
@@ -118,10 +138,6 @@ func realMain(args []string) int {
 		os.Exit(exitStopped)
 	}()
 
-	if cfg.Mode == "apply" && cfg.Confirm == nil && !cfg.Yes {
-		ui.Println("ERROR: not running in a terminal, so dhaara can't ask before applying. Add --yes to apply without asking.")
-		return exitFatal
-	}
 	changes := cfg.Mode == "apply" || cfg.Mode == "upload" || cfg.Mode == "download" || cfg.Mode == "snapshot"
 	if changes && !cfg.NoInhibit && !cfg.VerifyOnly && !cfg.DryRun {
 		release := platform.InhibitSleep()
@@ -129,23 +145,25 @@ func realMain(args []string) int {
 	}
 
 	switch cfg.Mode {
-	case "download", "pull":
+	case "add":
+		err = engine.Add(ctx, cfg, ui, c.name, c.args, c.add)
+	case "forget":
+		err = engine.Forget(cfg, ui, c.name, c.args)
+	case "status":
+		err = engine.Status(ctx, cfg, ui, c.name, c.verbose, c.exitCode)
+	case "apply":
+		err = engine.ApplyPairings(ctx, cfg, ui, c.name)
+	case "download":
 		_, err = engine.Download(ctx, cfg, ui)
-	case "sync":
-		_, err = engine.Sync(ctx, cfg, ui)
 	case "snapshot":
 		err = engine.Snapshot(ctx, cfg, ui)
-	case "phone":
-		err = engine.Phone(ctx, cfg, ui)
-	case "pending":
-		err = engine.Pending(ctx, cfg, ui)
-	case "apply":
-		err = engine.Apply(ctx, cfg, ui)
 	default:
 		_, err = engine.Upload(ctx, cfg, ui)
 	}
 	code := exitCode(ctx, err, ui)
-	ui.Printf("Log file: %s", logPath)
+	if code != exitOK || c.verbose || changes {
+		ui.Printf("Log file: %s", logPath)
+	}
 	return code
 }
 
@@ -154,6 +172,8 @@ func exitCode(ctx context.Context, err error, ui *term.Console) int {
 	switch {
 	case err == nil:
 		return exitOK
+	case errors.Is(err, engine.ErrPending):
+		return exitPending
 	case errors.Is(err, engine.ErrProblems):
 		return exitProblems // details were already printed
 	case ctx.Err() != nil || errors.Is(err, context.Canceled):
@@ -166,7 +186,7 @@ func exitCode(ctx context.Context, err error, ui *term.Console) int {
 	}
 }
 
-func parseFlags(args []string, stderr io.Writer) (engine.Config, error) {
+func parseFlags(args []string, stderr io.Writer) (command, error) {
 	home, _ := os.UserHomeDir()
 	configDir := filepath.Join(home, ".config", "dhaara")
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
@@ -176,53 +196,74 @@ func parseFlags(args []string, stderr io.Writer) (engine.Config, error) {
 	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
 		stateDir = filepath.Join(x, "dhaara")
 	}
-	cfg := engine.Config{
-		Mode:         "upload",
+	c := command{cfg: engine.Config{
 		ConfigDir:    configDir,
 		StateDir:     stateDir,
 		Endpoints:    gdrive.GoogleEndpoints,
 		Retry:        gdrive.DefaultRetry,
 		PaceInterval: 100 * time.Millisecond, // at most 10 requests/second, well under Google's limits
 		Trash:        platform.Trash,
-	}
+	}}
+	cfg := &c.cfg
 
-	if len(args) > 0 {
-		switch args[0] {
-		case "upload", "download", "sync", "pull", "snapshot", "phone", "pending", "apply":
-			cfg.Mode = args[0]
-			args = args[1:]
+	usage := func() { fmt.Fprint(stderr, usageText) }
+	if len(args) == 0 {
+		usage()
+		return c, errors.New("say what to do, like: dhaara status")
+	}
+	switch cmd := args[0]; cmd {
+	case "add", "forget", "status", "apply", "upload", "download", "snapshot":
+		cfg.Mode = cmd
+		args = args[1:]
+	case "help", "-h", "-help", "--help":
+		usage()
+		return c, flag.ErrHelp
+	default:
+		if hint, ok := replaced[cmd]; ok {
+			return c, fmt.Errorf("dhaara %s is replaced by pairings: %s. See dhaara help", cmd, hint)
 		}
+		if strings.HasPrefix(cmd, "-") {
+			return c, fmt.Errorf("say what to do before the options, like: dhaara status %s", cmd)
+		}
+		if strings.ContainsAny(cmd, "/~.") {
+			return c, fmt.Errorf("unknown command %q. To upload a folder: dhaara upload %s", cmd, cmd)
+		}
+		return c, fmt.Errorf("unknown command %q. See dhaara help", cmd)
 	}
-	cfg.Download = cfg.Mode == "download" || cfg.Mode == "pull"
-	cfg.Pull = cfg.Mode == "pull"
+	cfg.Download = cfg.Mode == "download"
 
-	fs := flag.NewFlagSet("dhaara", flag.ContinueOnError)
+	fs := flag.NewFlagSet("dhaara "+cfg.Mode, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	fs.Usage = func() { fmt.Fprint(stderr, usageText); fs.PrintDefaults() }
-	fs.StringVar(&cfg.RemoteName, "dest-name", "", "upload, sync: Drive folder path, like Work/Reports (default: the local folder's name)")
+	fs.Usage = func() { usage(); fs.PrintDefaults() }
+	fs.BoolVar(&c.add.Follow, "follow", false, "add: this folder only takes Drive's changes, never sends any")
+	fs.StringVar(&c.add.Serial, "serial", "", "add: which phone, as adb devices lists it (when several are connected)")
+	fs.BoolVar(&c.verbose, "v", false, "status: show every step, and how each place was checked")
+	fs.BoolVar(&c.verbose, "verbose", false, "status: same as -v")
+	fs.BoolVar(&c.exitCode, "exit-code", false, "status: exit with 3 when changes are pending")
+	fs.BoolVar(&cfg.Yes, "yes", false, "apply: don't check again or ask; do exactly what the last status saved")
+	fs.BoolVar(&cfg.AllowManyRemovals, "allow-many-removals", false, "apply: allow removing more than a quarter of a place's files")
+	fs.StringVar(&cfg.RemoteName, "dest-name", "", "upload: Drive path, like Work/Reports (default: the folder's name)")
 	fs.IntVar(&cfg.Workers, "workers", 3, "files transferred at the same time, 1-8")
-	chunkMB := fs.Int("chunk-mb", 8, "upload, sync: chunk size in MiB, 1-256; smaller files go up in a single request")
-	fs.BoolVar(&cfg.VerifyOnly, "verify-only", false, "upload: change nothing; check Drive against the local folder")
+	chunkMB := fs.Int("chunk-mb", 8, "upload, apply: chunk size in MiB, 1-256; smaller files go up in a single request")
+	fs.BoolVar(&cfg.VerifyOnly, "verify-only", false, "upload: change nothing; check Drive against the folder")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "upload, download, snapshot: change nothing; show what would be done")
-	fs.BoolVar(&cfg.Yes, "yes", false, "apply: don't ask before making the changes")
-	fs.BoolVar(&cfg.Overwrite, "overwrite", false, "download, pull: replace local files that differ from Drive")
-	fs.BoolVar(&cfg.NoInhibit, "no-inhibit", false, "let the laptop sleep during the transfer")
-	fs.BoolVar(&cfg.AllowManyRemovals, "allow-many-removals", false, "apply: allow removing more than a quarter of a side's files")
+	fs.BoolVar(&cfg.Overwrite, "overwrite", false, "download: replace local files that differ from Drive")
+	fs.BoolVar(&cfg.NoInhibit, "no-inhibit", false, "let the laptop sleep during transfers")
+	var flagExclude []string
 	fs.Func("exclude", "leave out files matching this pattern (repeatable; see above)", func(v string) error {
-		cfg.Exclude = append(cfg.Exclude, v)
+		flagExclude = append(flagExclude, v)
 		return nil
 	})
 	excludeFile := fs.String("exclude-file", filepath.Join(configDir, "exclude"), "file with exclusion patterns, one per line")
-	fs.StringVar(&cfg.PhoneDir, "phone-dir", "", "phone: folder on the phone (default /sdcard/<last part of DRIVE_FOLDER>)")
-	fs.StringVar(&cfg.ADB, "adb", "", "phone: path to adb (default: found on PATH or in ~/Android/Sdk)")
+	fs.StringVar(&cfg.ADB, "adb", "", "status, apply: path to adb (default: found on PATH or in ~/Android/Sdk)")
 	fs.StringVar(&cfg.ClientSecret, "client-secret", filepath.Join(configDir, "client_secret.json"),
 		"Google OAuth client file (type: Desktop app)")
 
-	// Allow options before or after the folder names.
+	// Allow options before or after the other arguments.
 	var positional []string
 	for {
 		if err := fs.Parse(args); err != nil {
-			return cfg, err
+			return c, err
 		}
 		if fs.NArg() == 0 {
 			break
@@ -237,89 +278,106 @@ func parseFlags(args []string, stderr io.Writer) (engine.Config, error) {
 		cfg.Confirm = askYesNo
 	}
 	allowed := map[string][]string{ // options that only some commands take
-		"dest-name":           {"upload", "sync"},
-		"chunk-mb":            {"upload", "sync"},
-		"verify-only":         {"upload"},
-		"overwrite":           {"download", "pull"},
-		"allow-many-removals": {"apply"},
+		"follow":              {"add"},
+		"serial":              {"add"},
+		"v":                   {"status"},
+		"verbose":             {"status"},
+		"exit-code":           {"status"},
 		"yes":                 {"apply"},
+		"allow-many-removals": {"apply"},
+		"dest-name":           {"upload"},
+		"chunk-mb":            {"upload", "apply"},
+		"verify-only":         {"upload"},
 		"dry-run":             {"upload", "download", "snapshot"},
-		"phone-dir":           {"phone"},
-		"adb":                 {"phone"},
+		"overwrite":           {"download"},
+		"exclude":             {"add", "upload", "download", "snapshot"},
+		"adb":                 {"add", "status", "apply"},
+		"workers":             {"upload", "download", "snapshot", "apply"},
 	}
 	for name, modes := range allowed {
 		if set[name] && !slices.Contains(modes, cfg.Mode) {
-			return cfg, fmt.Errorf("--%s is only for %s", name, strings.Join(modes, ", "))
+			return c, fmt.Errorf("--%s is only for %s", name, strings.Join(modes, ", "))
 		}
 	}
 
+	need := func(lo, hi int, form string) error {
+		if len(positional) < lo || len(positional) > hi {
+			fs.Usage()
+			return fmt.Errorf("usage: dhaara %s %s", cfg.Mode, form)
+		}
+		return nil
+	}
 	switch cfg.Mode {
-	case "download", "pull", "phone":
-		if len(positional) < 1 || len(positional) > 2 {
-			fs.Usage()
-			return cfg, fmt.Errorf("usage: dhaara %s DRIVE_FOLDER [LOCAL_FOLDER]", cfg.Mode)
+	case "add":
+		if err := need(2, 8, "NAME FOLDER drive:PATH [phone:/sdcard/PATH] [--follow], or NAME phone:/sdcard/PATH"); err != nil {
+			return c, err
 		}
-		cfg.RemoteName = positional[0]
-		switch {
-		case len(positional) == 2:
-			cfg.Source = expandHome(positional[1], home)
-		case cfg.Mode == "phone":
-			cfg.Source = filepath.Join(home, path.Base(strings.Trim(cfg.RemoteName, "/")))
-		default:
-			cfg.Source = path.Base(strings.Trim(cfg.RemoteName, "/"))
+		c.name = positional[0]
+		for _, a := range positional[1:] {
+			c.args = append(c.args, expandHome(a, home))
 		}
-		if cfg.Mode == "phone" && cfg.PhoneDir == "" {
-			cfg.PhoneDir = "/sdcard/" + path.Base(strings.Trim(cfg.RemoteName, "/"))
+		c.add.Exclude = flagExclude
+		flagExclude = nil
+		if err := exclude.Check(c.add.Exclude); err != nil {
+			return c, err
 		}
-	case "pending", "apply":
-		if len(positional) > 1 {
-			fs.Usage()
-			return cfg, fmt.Errorf("usage: dhaara %s [FOLDER]", cfg.Mode)
+	case "forget":
+		if err := need(1, 8, "NAME [phone:/sdcard/PATH]"); err != nil {
+			return c, err
+		}
+		c.name, c.args = positional[0], positional[1:]
+	case "status", "apply":
+		if err := need(0, 1, "[NAME]"); err != nil {
+			return c, err
 		}
 		if len(positional) == 1 {
-			cfg.Source = expandHome(positional[0], home)
+			c.name = positional[0]
+		}
+	case "download":
+		if err := need(1, 2, "DRIVE_PATH [FOLDER]"); err != nil {
+			return c, err
+		}
+		cfg.RemoteName = strings.TrimPrefix(positional[0], "drive:")
+		cfg.Source = path.Base(strings.Trim(cfg.RemoteName, "/"))
+		if len(positional) == 2 {
+			cfg.Source = expandHome(positional[1], home)
 		}
 	case "snapshot":
-		if len(positional) != 1 {
-			fs.Usage()
-			return cfg, errors.New("usage: dhaara snapshot DRIVE_FOLDER")
+		if err := need(1, 1, "DRIVE_PATH"); err != nil {
+			return c, err
 		}
-		cfg.RemoteName = positional[0]
-	default: // upload, sync
-		if len(positional) != 1 {
-			fs.Usage()
-			return cfg, errors.New("give exactly one folder")
+		cfg.RemoteName = strings.TrimPrefix(positional[0], "drive:")
+	default: // upload
+		if err := need(1, 1, "FOLDER"); err != nil {
+			return c, err
 		}
 		cfg.Source = expandHome(positional[0], home)
 	}
-	if cfg.PhoneDir != "" && !strings.HasPrefix(cfg.PhoneDir, "/") {
-		return cfg, errors.New("--phone-dir must be a full path, like /sdcard/Reports")
-	}
 	if cfg.RemoteName != "" {
 		if _, err := gdrive.SplitDrivePath(cfg.RemoteName); err != nil {
-			return cfg, err
+			return c, err
 		}
 	}
 	if cfg.Workers < 1 || cfg.Workers > 8 {
-		return cfg, errors.New("--workers must be between 1 and 8")
+		return c, errors.New("--workers must be between 1 and 8")
 	}
 	if *chunkMB < 1 || *chunkMB > 256 {
-		return cfg, errors.New("--chunk-mb must be between 1 and 256")
+		return c, errors.New("--chunk-mb must be between 1 and 256")
 	}
 	if cfg.VerifyOnly && cfg.DryRun {
-		return cfg, errors.New("use either --verify-only or --dry-run, not both")
+		return c, errors.New("use either --verify-only or --dry-run, not both")
 	}
 	cfg.ChunkSize = int64(*chunkMB) << 20 // a multiple of 256 KiB, as Google requires
 
 	fromFile, err := exclude.ReadFile(*excludeFile)
 	if err != nil {
-		return cfg, fmt.Errorf("cannot read %s: %v", *excludeFile, err)
+		return c, fmt.Errorf("cannot read %s: %v", *excludeFile, err)
 	}
-	cfg.Exclude = append(fromFile, cfg.Exclude...)
+	cfg.Exclude = append(fromFile, flagExclude...)
 	if err := exclude.Check(cfg.Exclude); err != nil {
-		return cfg, err
+		return c, err
 	}
-	return cfg, nil
+	return c, nil
 }
 
 // askYesNo asks on the terminal; only "y" or "yes" counts as yes.
