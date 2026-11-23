@@ -64,35 +64,100 @@ anything**, and changes happen only when you apply them.
     dhaara apply --yes                                # ... without asking
     dhaara snapshot Work/Reports                      # full copy on Drive, only when asked
 
-- A check saves its plan (one per folder, replacing the last one). `apply`
-  reads both sides again and does only the planned steps that still hold
-  exactly (same file, same Drive copy, same MD5). Anything that changed
+### What each command looks at
+
+| Command | First argument | Second argument | Changes |
+|---|---|---|---|
+| `sync FOLDER` | the local folder | (none; `--dest-name` picks the Drive folder, default its name at the top of My Drive) | Drive |
+| `pull DRIVE_FOLDER [LOCAL]` | the Drive folder to follow | the local folder (default `~/<last part>`) | this computer |
+| `phone DRIVE_FOLDER [LOCAL]` | the Drive folder the phone should match | where the files come from (default `~/<last part>`) | the phone, in `--phone-dir` (default `/sdcard/<last part>`) |
+
+So `dhaara phone Work/Reports` makes `/sdcard/Reports` match Drive's
+`Work/Reports`, sending the files from `~/Reports` over USB or wireless
+debugging. Nothing is downloaded from Drive.
+
+### Plans: check, pending, apply
+
+- A check saves a plan. There's one plan per kind and set of folders (sync
+  `~/Reports`, phone `Work/Reports` into `/sdcard/Reports`, ...), and a new
+  check of the same replaces the old one. Plans live in
+  `~/.local/state/dhaara/plans/`.
+- `pending` shows every plan in full. `apply` goes through them oldest first,
+  shows each one and asks `[y/N]` **for each plan separately**. Saying no
+  skips that plan and keeps it pending; the others still run. `--yes`
+  applies them all without asking.
+- `apply` reads both sides again and does only the planned steps that still
+  hold exactly (same file, same Drive copy, same MD5). Anything that changed
   since the check is skipped and listed, and anything new waits for the
   next check, so nothing happens that you didn't review.
-- `dhaara apply ~/Reports` (or `pending ~/Reports`) handles just that
-  folder's plans.
-- **sync** uploads new and changed files, and moves Drive's copy of anything
-  deleted here to Drive's trash. A rename or move here is a move on Drive,
-  not a new upload. It also follows changes made on Drive by another
-  machine's sync. A file changed on both sides is a conflict: neither copy
-  is touched. Everything it takes off Drive is first written to a removed
-  list in `dhaara data/` in My Drive.
-- **pull** downloads what's new or changed, and follows the removed list: a
-  local file is moved to the trash, renamed, or replaced only if its path
-  and MD5 are on the list. Files that only ever existed there are left alone.
-- **phone** does the same in a folder on an Android phone over adb (USB or
-  wireless debugging; default `/sdcard/<last part of DRIVE_FOLDER>`),
-  copying from this laptop's copy (default `~/<last part>`), so nothing is
-  downloaded. A removal happens only if the file's MD5, checked on the
-  phone, matches the list.
-- **snapshot** copies the whole Drive folder into `<folder> snapshots/<date>`
-  next to it, on Drive itself: nothing is downloaded or written locally. A
-  stopped snapshot continues on the next run. It counts against storage.
+- Order matters when plans depend on each other. A phone or pull plan
+  checked before a sync was applied doesn't know what that sync changed on
+  Drive, so its new steps are skipped as "appeared since the check". Apply
+  the sync, then check the phone or the other laptop again.
+- `dhaara apply ~/Reports` (or `pending ~/Reports`) handles only the plans
+  whose local folder is `~/Reports`. A sync and a phone plan that both use
+  `~/Reports` both match; answer no to the one you want to leave.
 - `apply` stops before removing more than a quarter of a side's files (at
   least 20) unless you add `--allow-many-removals`; the check warns first.
-- Folders emptied on Drive are left there (dhaara can't see files other
-  apps put in them, so it never trashes a folder); pull doesn't recreate
-  folders that hold no files.
+
+### sync
+
+Uploads new and changed files, and moves Drive's copy of anything deleted
+here to Drive's trash. A rename or move here is a move on Drive, not a new
+upload. It also follows changes made on Drive by another machine's sync. A
+file changed on both sides is a conflict: neither copy is touched.
+Everything it takes off Drive is first written to a **removed list** (path
+and MD5 of each old file) in `dhaara data/` in My Drive. That list is how
+pull and phone know a removal was meant.
+
+### pull and phone: following Drive
+
+Laptops that pull and phones only take changes from Drive; they never send
+anything back. For each file they hold:
+
+| The file there is | What happens |
+|---|---|
+| the same as Drive's | left alone |
+| missing | copied (or moved, if the same contents sit at a path the removed list says was moved away) |
+| different from Drive's | replaced only if that exact old version (path and MD5) is on the removed list; otherwise a conflict, left alone (pull: `--overwrite` replaces it) |
+| not on Drive | removed only if that exact file is on the removed list; otherwise it only ever existed there, so it's left alone |
+
+Pull moves removed files to the computer's trash. Phone deletes them, after
+checking the file's MD5 on the phone.
+
+**Where phone gets its files, and the checksum check.** Before sending a
+file, phone works out the MD5 (a fingerprint of the contents) of the copy on
+this computer and compares it with Drive's. Only a match is sent, so the
+phone gets exactly the version Drive holds. A file that's missing here or
+different (edited after the last sync, or changed on Drive by another
+machine) isn't sent: the check lists it as `can't copy (missing or different
+in ...)` and ends with problems, and the phone's copy, if any, is left as it
+is. Everything else still goes. Fix it by running `dhaara sync` on this
+folder (and `apply`), then check the phone again.
+
+Each file arrives on the phone under a temporary name (`.dhaara-push.part`),
+its MD5 is checked there, and only then is it renamed into place, so a
+broken transfer never looks like a real file.
+
+### snapshot
+
+Copies the whole Drive folder into `<folder> snapshots/<date>` next to it,
+on Drive itself: nothing is downloaded or written locally. A stopped
+snapshot continues on the next run, and a final pass checks every copy. It
+counts against storage.
+
+A snapshot lists the folder once, then copies file by file. Checking
+(`sync`, `pull`, `phone`, `pending`) while it runs is fine. Changing the
+same Drive folder isn't: `apply`, `upload`, `download` and `snapshot` each
+lock the folder, and a second one stops straight away with "another dhaara
+run is changing the Drive folder …", changing nothing (its plan stays
+pending). Run it again once the first has finished.
+
+### Folders
+
+Folders emptied on Drive are left there (dhaara can't see files other apps
+put in them, so it never trashes a folder); pull doesn't recreate folders
+that hold no files.
 
 **Exclusions:** one pattern per line in `~/.config/dhaara/exclude`, plus
 `--exclude PATTERN`. Without a `/` a pattern matches a file or folder name
@@ -139,6 +204,9 @@ half-uploaded files continue where they stopped. Options: `dhaara --help`.
   backoff (honours `Retry-After`); keeps retrying through Wi-Fi drops for up
   to 15 minutes. A request with no data moving for 90 s is abandoned and retried.
 - HTTP/1.1 only (Drive uploads can stall over HTTP/2), at most 10 requests/s.
+- Reads a Drive folder level by level, up to 8 folders at a time, and
+  remembers each listing for the rest of the run, so every folder is read
+  once per check. The final check after changes reads Drive again.
 - Every upload is checked against Google's MD5; a bad copy is trashed and
   re-sent. A final pass re-reads the Drive folder and verifies every file.
 - Never deletes: replaced or duplicate copies go to Drive's trash.

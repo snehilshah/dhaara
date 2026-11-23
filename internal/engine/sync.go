@@ -221,16 +221,17 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 		return sum, err
 	}
 	ui.Printf("Reading the Drive folder %q...", dest)
-	rootID, _, err := gdrive.ResolveFolder(ctx, d, dest, false)
+	ls := d.NewListings() // every folder is read once; the check after the changes reads again
+	rootID, _, err := gdrive.ResolveFolder(ctx, ls, dest, false)
 	if err != nil {
 		return sum, err
 	}
-	remote, _, exRemote, err := readRemote(ctx, d, rootID, cfg.Exclude, ui)
+	remote, _, exRemote, err := readRemote(ctx, ls, rootID, cfg.Exclude, ui)
 	if err != nil {
 		return sum, err
 	}
 	sum.Excluded = len(exLocal) + len(exRemote)
-	removed, err := loadRemoved(ctx, d, dest, rootID)
+	removed, err := loadRemoved(ctx, d, ls, dest, rootID)
 	if err != nil {
 		return sum, err
 	}
@@ -277,6 +278,9 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 			Steps: syncSteps(plan, localMD5), Conflicts: plan.conflicts})
 	}
 	plan = filterSync(plan, localMD5, matchSteps(ui, cfg.applying, syncSteps(plan, localMD5)))
+	if cfg.predict != nil {
+		*cfg.predict = predictDrive(plan, localMD5, remote, removed)
+	}
 	if err := checkMassRemoval(len(plan.driveTrash), len(remote), "on Drive", cfg); err != nil {
 		return sum, err
 	}
@@ -345,25 +349,13 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 
 	// 2. Tell other devices first: the removed list is saved before anything
 	// leaves the Drive folder.
-	for _, m := range plan.driveMoves {
-		removed.Add(m.from.Rel, m.from.MD5, m.from.Size, "moved")
-		removed.Forget(m.to.Rel, m.from.MD5)
-	}
-	for _, r := range plan.driveTrash {
-		removed.Add(r.Rel, r.MD5, r.Size, "deleted")
-	}
-	for _, r := range plan.replaced {
-		removed.Add(r.Rel, r.MD5, r.Size, "replaced")
-	}
-	for _, f := range plan.upload {
-		removed.Forget(f.Rel, localMD5[f.Rel])
-	}
+	noteRemovals(plan, localMD5, removed)
 	if err := removed.Save(ctx); err != nil {
 		return sum, err
 	}
 
 	// 3. Folders for everything that goes up.
-	t, err := loadTree(ctx, d, dest, dirs, true)
+	t, err := loadTree(ctx, ls, dest, dirs, true)
 	if err != nil {
 		return sum, err
 	}
@@ -436,7 +428,7 @@ func Sync(ctx context.Context, cfg Config, ui *term.Console) (SyncSummary, error
 	if err != nil {
 		return sum, err
 	}
-	remoteAfter, treeAfter, _, err := readRemote(ctx, d, t.ids[""], cfg.Exclude, nil)
+	remoteAfter, treeAfter, _, err := readRemote(ctx, d.NewListings(), t.ids[""], cfg.Exclude, nil)
 	if err != nil {
 		return sum, err
 	}
@@ -518,12 +510,12 @@ func scanFolder(src string, patterns []string, ui *term.Console) (dirs []string,
 
 // readRemote lists the Drive folder without excluded paths. A missing folder
 // (rootID "") is empty. ui may be nil.
-func readRemote(ctx context.Context, d *gdrive.Drive, rootID string, patterns []string, ui *term.Console) (map[string]remoteFile, *remoteTree, []string, error) {
+func readRemote(ctx context.Context, fs gdrive.Folders, rootID string, patterns []string, ui *term.Console) (map[string]remoteFile, *remoteTree, []string, error) {
 	out := map[string]remoteFile{}
 	if rootID == "" {
 		return out, &remoteTree{dirIDs: map[string]string{}, byRel: map[string]remoteFile{}}, nil, nil
 	}
-	t, err := listTree(ctx, d, rootID)
+	t, err := listTree(ctx, fs, rootID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -725,4 +717,56 @@ func isFatal(err error) bool {
 func removeOrder(rels []string) []string {
 	slices.SortFunc(rels, func(a, b string) int { return cmp.Or(cmp.Compare(len(b), len(a)), cmp.Compare(a, b)) })
 	return slices.Compact(rels)
+}
+
+// noteRemovals records on the removed list what the plan takes out of the
+// Drive folder, and forgets entries for files the plan puts back.
+func noteRemovals(p syncPlan, localMD5 map[string]string, removed *removedList) {
+	for _, m := range p.driveMoves {
+		removed.Add(m.from.Rel, m.from.MD5, m.from.Size, "moved")
+		removed.Forget(m.to.Rel, m.from.MD5)
+	}
+	for _, r := range p.driveTrash {
+		removed.Add(r.Rel, r.MD5, r.Size, "deleted")
+	}
+	for _, r := range p.replaced {
+		removed.Add(r.Rel, r.MD5, r.Size, "replaced")
+	}
+	for _, f := range p.upload {
+		removed.Forget(f.Rel, localMD5[f.Rel])
+	}
+}
+
+// drivePrediction is what the Drive folder will hold once a sync plan has
+// run: every file by path (with its MD5 and size; uploads have no ID yet),
+// and the removed list. Later stages (the phone, another laptop) can be
+// planned against it before the sync runs. It only predicts: those stages
+// are planned again against the real Drive when they are applied.
+type drivePrediction struct {
+	files   map[string]remoteFile
+	removed []removedEntry
+}
+
+// predictDrive works out the Drive folder after plan, from the folder and
+// removed list before it. It changes neither.
+func predictDrive(p syncPlan, localMD5 map[string]string, remote map[string]remoteFile, removed *removedList) drivePrediction {
+	files := make(map[string]remoteFile, len(remote))
+	for rel, r := range remote {
+		files[rel] = r
+	}
+	for _, m := range p.driveMoves {
+		delete(files, m.from.Rel)
+		moved := m.from
+		moved.Rel = m.to.Rel
+		files[m.to.Rel] = moved
+	}
+	for _, r := range p.driveTrash {
+		delete(files, r.Rel)
+	}
+	for _, f := range p.upload {
+		files[f.Rel] = remoteFile{Rel: f.Rel, Size: f.Size, MD5: localMD5[f.Rel]}
+	}
+	list := &removedList{entries: slices.Clone(removed.entries)}
+	noteRemovals(p, localMD5, list)
+	return drivePrediction{files: files, removed: list.entries}
 }

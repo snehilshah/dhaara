@@ -46,6 +46,13 @@ func Upload(ctx context.Context, cfg Config, ui *term.Console) (Summary, error) 
 	if err != nil {
 		return sum, err
 	}
+	if !cfg.DryRun && !cfg.VerifyOnly {
+		release, err := lockFolder(cfg, dest, "upload")
+		if err != nil {
+			return sum, err
+		}
+		defer release()
+	}
 
 	key := sha256.Sum256([]byte(src + "\x00" + dest))
 	st, err := openState(filepath.Join(cfg.StateDir, hex.EncodeToString(key[:8])))
@@ -66,7 +73,7 @@ func Upload(ctx context.Context, cfg Config, ui *term.Console) (Summary, error) 
 	}
 
 	ui.Printf("Checking what is already in the Drive folder %q...", dest)
-	tree, err := loadTree(ctx, d, dest, dirs, !cfg.DryRun)
+	tree, err := loadTree(ctx, d.NewListings(), dest, dirs, !cfg.DryRun)
 	if err != nil {
 		return sum, err
 	}
@@ -224,28 +231,21 @@ feed:
 	return uploaded, failures, int(u.resumed.Load()), context.Cause(ctx)
 }
 
-// tree maps local folders to Drive folder IDs and caches folder listings.
+// tree maps local folders to Drive folder IDs. Folder listings come from
+// ls, so each folder is read from Drive once.
 type tree struct {
-	d        *gdrive.Drive
-	ids      map[string]string // local rel dir -> Drive folder ID ("" if missing)
-	listings map[string][]gdrive.File
+	ls  *gdrive.Listings
+	ids map[string]string // local rel dir -> Drive folder ID ("" if missing)
 }
 
 func (t *tree) children(ctx context.Context, id string) ([]gdrive.File, error) {
-	if l, ok := t.listings[id]; ok {
-		return l, nil
-	}
-	l, err := t.d.ListChildren(ctx, id)
-	if err == nil {
-		t.listings[id] = l
-	}
-	return l, err
+	return t.ls.ListChildren(ctx, id)
 }
 
 // loadTree finds (and, if create is set, makes) the Drive folder for every
 // local folder. When several folders share a name, the oldest one is used.
-func loadTree(ctx context.Context, d *gdrive.Drive, dest string, dirs []string, create bool) (*tree, error) {
-	t := &tree{d: d, ids: map[string]string{}, listings: map[string][]gdrive.File{}}
+func loadTree(ctx context.Context, ls *gdrive.Listings, dest string, dirs []string, create bool) (*tree, error) {
+	t := &tree{ls: ls, ids: map[string]string{}}
 	ensure := func(name, parent string) (string, error) {
 		kids, err := t.children(ctx, parent)
 		if err != nil {
@@ -259,15 +259,9 @@ func loadTree(ctx context.Context, d *gdrive.Drive, dest string, dirs []string, 
 		if !create {
 			return "", nil
 		}
-		id, err := d.CreateFolder(ctx, name, parent)
-		if err != nil {
-			return "", err
-		}
-		t.listings[parent] = append(t.listings[parent], gdrive.File{ID: id, Name: name, MimeType: gdrive.FolderMime})
-		t.listings[id] = nil
-		return id, nil
+		return ls.CreateFolder(ctx, name, parent)
 	}
-	root, _, err := gdrive.ResolveFolder(ctx, d, dest, create)
+	root, _, err := gdrive.ResolveFolder(ctx, ls, dest, create)
 	if err != nil {
 		return nil, err
 	}
@@ -344,7 +338,7 @@ func anyMatch(f *LocalFile, items []gdrive.File, st *State) (*gdrive.File, error
 func verify(ctx context.Context, d *gdrive.Drive, st *State, files []*LocalFile, dirs []string, dest string,
 	ui *term.Console, dedupe bool, sum Summary) (Summary, error) {
 	ui.Println("Verifying every file on Drive (size + MD5 checksum)...")
-	t, err := loadTree(ctx, d, dest, dirs, false)
+	t, err := loadTree(ctx, d.NewListings(), dest, dirs, false) // read again, not from memory
 	if err != nil {
 		return sum, err
 	}

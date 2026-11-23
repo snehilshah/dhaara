@@ -83,12 +83,12 @@ func (d *Drive) WriteSmall(ctx context.Context, id, name, parent string, data []
 
 // EnsureFolder returns the oldest folder called name in parent, creating it
 // if create is set (otherwise "" when missing).
-func EnsureFolder(ctx context.Context, d *Drive, parent, name string, create bool) (string, error) {
-	id, err := FindFolder(ctx, d, parent, name)
+func EnsureFolder(ctx context.Context, fs Folders, parent, name string, create bool) (string, error) {
+	id, err := FindFolder(ctx, fs, parent, name)
 	if err != nil || id != "" || !create {
 		return id, err
 	}
-	return d.CreateFolder(ctx, name, parent)
+	return fs.CreateFolder(ctx, name, parent)
 }
 
 // SplitDrivePath turns "Work/Reports" into its folder names. A Drive path
@@ -111,7 +111,7 @@ func SplitDrivePath(p string) ([]string, error) {
 // folders along the way if create is set. Where several folders share a
 // name, the oldest is used. id is "" if it doesn't exist (and create is
 // unset); parent is the folder holding it ("" if that is missing too).
-func ResolveFolder(ctx context.Context, d *Drive, path string, create bool) (id, parent string, err error) {
+func ResolveFolder(ctx context.Context, fs Folders, path string, create bool) (id, parent string, err error) {
 	parts, err := SplitDrivePath(path)
 	if err != nil {
 		return "", "", Fatalf("%v", err)
@@ -119,7 +119,7 @@ func ResolveFolder(ctx context.Context, d *Drive, path string, create bool) (id,
 	cur := "root"
 	for _, name := range parts {
 		parent = cur
-		if cur, err = EnsureFolder(ctx, d, cur, name, create); err != nil || cur == "" {
+		if cur, err = EnsureFolder(ctx, fs, cur, name, create); err != nil || cur == "" {
 			return "", parent, err
 		}
 	}
@@ -127,8 +127,8 @@ func ResolveFolder(ctx context.Context, d *Drive, path string, create bool) (id,
 }
 
 // FindFolder returns the ID of the oldest folder called name inside parent.
-func FindFolder(ctx context.Context, d *Drive, parent, name string) (string, error) {
-	kids, err := d.ListChildren(ctx, parent)
+func FindFolder(ctx context.Context, fs Folders, parent, name string) (string, error) {
+	kids, err := fs.ListChildren(ctx, parent)
 	if err != nil {
 		return "", err
 	}

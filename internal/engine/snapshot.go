@@ -34,15 +34,23 @@ func Snapshot(ctx context.Context, cfg Config, ui *term.Console) error {
 		return err
 	}
 	name := cfg.RemoteName
+	if !cfg.DryRun {
+		release, err := lockFolder(cfg, name, "snapshot")
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	ui.Printf("Reading the Drive folder %q...", name)
-	rootID, parentID, err := gdrive.ResolveFolder(ctx, d, name, false)
+	ls := d.NewListings()
+	rootID, parentID, err := gdrive.ResolveFolder(ctx, ls, name, false)
 	if err != nil {
 		return err
 	}
 	if rootID == "" {
 		return gdrive.Fatalf("no folder named %q found in your Drive. dhaara can only see folders it uploaded itself", name)
 	}
-	src, err := listTree(ctx, d, rootID)
+	src, err := listTree(ctx, ls, rootID)
 	if err != nil {
 		return err
 	}
@@ -56,13 +64,13 @@ func Snapshot(ctx context.Context, cfg Config, ui *term.Console) error {
 	ui.Printf("On Drive: %d files, %s, %d subfolders.", len(src.files), term.Size(total), len(src.dirs))
 
 	snapsName := snapshotsFolderName(name)
-	snapsID, err := gdrive.EnsureFolder(ctx, d, parentID, filepath.Base(snapsName), !cfg.DryRun)
+	snapsID, err := gdrive.EnsureFolder(ctx, ls, parentID, filepath.Base(snapsName), !cfg.DryRun)
 	if err != nil {
 		return err
 	}
 	var existing []gdrive.File
 	if snapsID != "" {
-		if existing, err = d.ListChildren(ctx, snapsID); err != nil {
+		if existing, err = ls.ListChildren(ctx, snapsID); err != nil {
 			return err
 		}
 	}
@@ -100,13 +108,13 @@ func Snapshot(ctx context.Context, cfg Config, ui *term.Console) error {
 			term.Size(total), term.Size(max(0, limit-usage)))
 	}
 	if workID == "" {
-		if workID, err = d.CreateFolder(ctx, final+unfinishedSuffix, snapsID); err != nil {
+		if workID, err = ls.CreateFolder(ctx, final+unfinishedSuffix, snapsID); err != nil {
 			return err
 		}
 	}
 
 	// The same folders, and what's already there from a stopped run.
-	dst, err := listTree(ctx, d, workID)
+	dst, err := listTree(ctx, ls, workID)
 	if err != nil {
 		return err
 	}
@@ -146,7 +154,7 @@ func Snapshot(ctx context.Context, cfg Config, ui *term.Console) error {
 
 	// Check the copy against the original, file by file.
 	ui.Println("Checking the snapshot against the original (size + MD5)...")
-	check, err := listTree(ctx, d, workID)
+	check, err := listTree(ctx, d.NewListings(), workID) // read again, not from memory
 	if err != nil {
 		return err
 	}

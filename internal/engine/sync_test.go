@@ -549,7 +549,7 @@ func TestSnapshotCopiesOnDrive(t *testing.T) {
 	e.fd.mu.Lock()
 	e.fd.failRate = 0
 	e.fd.onCopy = func(n int) {
-		if n == d["copy"]+5 {
+		if n >= d["copy"]+5 { // >=: parallel copies can step past an exact count
 			cancel()
 		}
 	}

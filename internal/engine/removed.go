@@ -33,6 +33,7 @@ type removedEntry struct {
 
 type removedList struct {
 	d        *gdrive.Drive
+	fs       gdrive.Folders
 	name     string // "" when the synced folder doesn't exist yet
 	folderID string // "dhaara data"
 	fileID   string
@@ -46,17 +47,17 @@ func removedFileName(remotePath, targetID string) string {
 
 // loadRemoved reads the list for the Drive folder targetID. A missing list
 // (or folder, targetID "") is just empty.
-func loadRemoved(ctx context.Context, d *gdrive.Drive, remotePath, targetID string) (*removedList, error) {
-	r := &removedList{d: d}
+func loadRemoved(ctx context.Context, d *gdrive.Drive, fs gdrive.Folders, remotePath, targetID string) (*removedList, error) {
+	r := &removedList{d: d, fs: fs}
 	if targetID == "" {
 		return r, nil
 	}
 	r.name = removedFileName(remotePath, targetID)
 	var err error
-	if r.folderID, err = gdrive.EnsureFolder(ctx, d, "root", dataFolderName, false); err != nil || r.folderID == "" {
+	if r.folderID, err = gdrive.EnsureFolder(ctx, fs, "root", dataFolderName, false); err != nil || r.folderID == "" {
 		return r, err
 	}
-	kids, err := d.ListChildren(ctx, r.folderID)
+	kids, err := fs.ListChildren(ctx, r.folderID)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +135,7 @@ func (r *removedList) Save(ctx context.Context) error {
 		return fmt.Errorf("internal error: removed list for a folder that doesn't exist")
 	}
 	if r.folderID == "" {
-		id, err := gdrive.EnsureFolder(ctx, r.d, "root", dataFolderName, true)
+		id, err := gdrive.EnsureFolder(ctx, r.fs, "root", dataFolderName, true)
 		if err != nil {
 			return fmt.Errorf("cannot create %q on Drive: %w", dataFolderName, err)
 		}

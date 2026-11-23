@@ -28,12 +28,29 @@ import (
 // changed since the plan was made is skipped, and anything new waits for
 // the next sync, so apply never does something that wasn't reviewed.
 
-// planStep is one change in a plan. Key identifies it exactly (operation,
-// paths, Drive ID, MD5s); Line is what the user reads.
+// planStep is one change in a plan, described exactly: what it does, where
+// the change is made, and which contents and Drive copies it expects. Key is
+// made from those fields (see step) and is what apply compares. Line is what
+// the user reads.
 type planStep struct {
-	Key     string `json:"key"`
-	Line    string `json:"line"`
-	Removal bool   `json:"removal,omitempty"`
+	Op      string   `json:"op"`      // upload, replace, move, trash, download, fetch, remove
+	RunsOn  string   `json:"runs_on"` // drive, here or phone: where the change is made
+	Path    string   `json:"path"`
+	To      string   `json:"to,omitempty"`       // where a move goes
+	MD5     string   `json:"md5,omitempty"`      // contents written, moved or removed
+	OldMD5  string   `json:"old_md5,omitempty"`  // contents a download or fetch replaces
+	Size    int64    `json:"size,omitempty"`     // of the contents in MD5
+	FileIDs []string `json:"file_ids,omitempty"` // the Drive copies it acts on
+	Removal bool     `json:"removal,omitempty"`
+	Line    string   `json:"line"`
+	Key     string   `json:"key"`
+}
+
+// step fills in the key from the step's fields. Two steps are the same
+// change exactly when their keys are equal.
+func step(s planStep) planStep {
+	s.Key = stepKey(s.Op, s.RunsOn, s.Path, s.To, s.MD5, s.OldMD5, strings.Join(s.FileIDs, ","))
+	return s
 }
 
 type savedPlan struct {
@@ -262,6 +279,10 @@ func Apply(ctx context.Context, cfg Config, ui *term.Console) error {
 			}
 		}
 
+		release, err := lockFolder(cfg, p.RemoteName, "apply")
+		if err != nil {
+			return err
+		}
 		run := cfg
 		run.Mode, run.Source, run.RemoteName, run.PhoneDir = p.Kind, p.Source, p.RemoteName, p.PhoneDir
 		run.applying = p
@@ -276,6 +297,7 @@ func Apply(ctx context.Context, cfg Config, ui *term.Console) error {
 		default:
 			err = fmt.Errorf("unknown plan kind %q in %s", p.Kind, p.path)
 		}
+		release()
 		if ctx.Err() != nil {
 			return ctx.Err() // keep the plan: apply again to continue
 		}
@@ -338,32 +360,32 @@ func syncSteps(p syncPlan, localMD5 map[string]string) []planStep {
 	var out []planStep
 	for _, f := range p.upload {
 		if len(f.ReplaceIDs) > 0 {
-			out = append(out, planStep{Key: stepKey("replace-on-drive", f.Rel, localMD5[f.Rel], strings.Join(f.ReplaceIDs, ",")),
-				Line: fmt.Sprintf("upload %s (changed, %s)", f.Rel, term.Size(f.Size))})
+			out = append(out, step(planStep{Op: "replace", RunsOn: "drive", Path: f.Rel, MD5: localMD5[f.Rel], Size: f.Size,
+				FileIDs: f.ReplaceIDs, Line: fmt.Sprintf("upload %s (changed, %s)", f.Rel, term.Size(f.Size))}))
 		} else {
-			out = append(out, planStep{Key: stepKey("upload", f.Rel, localMD5[f.Rel]),
-				Line: fmt.Sprintf("upload %s (new, %s)", f.Rel, term.Size(f.Size))})
+			out = append(out, step(planStep{Op: "upload", RunsOn: "drive", Path: f.Rel, MD5: localMD5[f.Rel], Size: f.Size,
+				Line: fmt.Sprintf("upload %s (new, %s)", f.Rel, term.Size(f.Size))}))
 		}
 	}
 	for _, m := range p.driveMoves {
-		out = append(out, planStep{Key: stepKey("move-on-drive", m.from.Rel, m.to.Rel, m.from.ID, m.from.MD5),
-			Line: fmt.Sprintf("move on Drive %s → %s", m.from.Rel, m.to.Rel)})
+		out = append(out, step(planStep{Op: "move", RunsOn: "drive", Path: m.from.Rel, To: m.to.Rel, MD5: m.from.MD5, Size: m.from.Size,
+			FileIDs: []string{m.from.ID}, Line: fmt.Sprintf("move on Drive %s → %s", m.from.Rel, m.to.Rel)}))
 	}
 	for _, r := range p.driveTrash {
-		out = append(out, planStep{Key: stepKey("trash-on-drive", r.Rel, r.ID, r.MD5),
-			Line: fmt.Sprintf("remove from Drive (to Drive's trash) %s", r.Rel), Removal: true})
+		out = append(out, step(planStep{Op: "trash", RunsOn: "drive", Path: r.Rel, MD5: r.MD5, Size: r.Size, FileIDs: []string{r.ID},
+			Removal: true, Line: fmt.Sprintf("remove from Drive (to Drive's trash) %s", r.Rel)}))
 	}
 	for _, r := range p.download {
-		out = append(out, planStep{Key: stepKey("download", r.Rel, r.ID, r.MD5, localMD5[r.Rel]),
-			Line: fmt.Sprintf("download %s (%s)", r.Rel, term.Size(r.Size))})
+		out = append(out, step(planStep{Op: "download", RunsOn: "here", Path: r.Rel, MD5: r.MD5, OldMD5: localMD5[r.Rel], Size: r.Size,
+			FileIDs: []string{r.ID}, Line: fmt.Sprintf("download %s (%s)", r.Rel, term.Size(r.Size))}))
 	}
 	for _, m := range p.localMoves {
-		out = append(out, planStep{Key: stepKey("move-here", m.from, m.to.Rel, m.to.ID, m.to.MD5),
-			Line: fmt.Sprintf("move here %s → %s", m.from, m.to.Rel)})
+		out = append(out, step(planStep{Op: "move", RunsOn: "here", Path: m.from, To: m.to.Rel, MD5: m.to.MD5, Size: m.to.Size,
+			FileIDs: []string{m.to.ID}, Line: fmt.Sprintf("move here %s → %s", m.from, m.to.Rel)}))
 	}
 	for _, rel := range p.localTrash {
-		out = append(out, planStep{Key: stepKey("trash-here", rel, localMD5[rel]),
-			Line: fmt.Sprintf("remove here (to the trash) %s", rel), Removal: true})
+		out = append(out, step(planStep{Op: "trash", RunsOn: "here", Path: rel, MD5: localMD5[rel],
+			Removal: true, Line: fmt.Sprintf("remove here (to the trash) %s", rel)}))
 	}
 	return out
 }
@@ -420,31 +442,35 @@ func filterSync(p syncPlan, localMD5 map[string]string, keep map[string]bool) sy
 	return out
 }
 
-// mirrorSteps describes a pull or phone plan as steps. fetchVerb is
-// "download" or "copy to the phone"; where is "here" or "on the phone".
-func mirrorSteps(p mirrorPlan, md5 map[string]string, fetchVerb, where string) []planStep {
+// mirrorSteps describes a pull or phone plan as steps. on is where the
+// changes are made: "here" (pull) or "phone".
+func mirrorSteps(p mirrorPlan, md5 map[string]string, on string) []planStep {
+	fetchVerb, where := "download", "here"
+	if on == "phone" {
+		fetchVerb, where = "copy to the phone", "on the phone"
+	}
 	var out []planStep
 	for _, m := range p.moves {
-		out = append(out, planStep{Key: stepKey("move", m.From, m.To.Rel, md5[m.From]),
-			Line: fmt.Sprintf("move %s %s → %s", where, m.From, m.To.Rel)})
+		out = append(out, step(planStep{Op: "move", RunsOn: on, Path: m.From, To: m.To.Rel, MD5: md5[m.From], Size: m.To.Size,
+			Line: fmt.Sprintf("move %s %s → %s", where, m.From, m.To.Rel)}))
 	}
 	for _, rel := range p.remove {
-		out = append(out, planStep{Key: stepKey("remove", rel, md5[rel]),
-			Line: fmt.Sprintf("remove %s %s", where, rel), Removal: true})
+		out = append(out, step(planStep{Op: "remove", RunsOn: on, Path: rel, MD5: md5[rel],
+			Removal: true, Line: fmt.Sprintf("remove %s %s", where, rel)}))
 	}
 	for _, r := range p.fetch {
 		what, old := "new", ""
 		if p.replace[r.Rel] {
 			what, old = "replaces the old version", md5[r.Rel]
 		}
-		out = append(out, planStep{Key: stepKey("fetch", r.Rel, r.MD5, old),
-			Line: fmt.Sprintf("%s %s (%s, %s)", fetchVerb, r.Rel, what, term.Size(r.Size))})
+		out = append(out, step(planStep{Op: "fetch", RunsOn: on, Path: r.Rel, MD5: r.MD5, OldMD5: old, Size: r.Size,
+			Line: fmt.Sprintf("%s %s (%s, %s)", fetchVerb, r.Rel, what, term.Size(r.Size))}))
 	}
 	return out
 }
 
-func filterMirror(p mirrorPlan, md5 map[string]string, keep map[string]bool) mirrorPlan {
-	steps := mirrorSteps(p, md5, "", "")
+func filterMirror(p mirrorPlan, md5 map[string]string, on string, keep map[string]bool) mirrorPlan {
+	steps := mirrorSteps(p, md5, on)
 	ok := func(i int) bool { return keep[steps[i].Key] }
 	out := mirrorPlan{replace: map[string]bool{}, conflicts: p.conflicts, same: p.same}
 	i := 0

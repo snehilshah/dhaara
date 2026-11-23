@@ -97,18 +97,19 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 		return err
 	}
 	ui.Printf("Reading the Drive folder %q...", cfg.RemoteName)
-	rootID, _, err := gdrive.ResolveFolder(ctx, d, cfg.RemoteName, false)
+	ls := d.NewListings()
+	rootID, _, err := gdrive.ResolveFolder(ctx, ls, cfg.RemoteName, false)
 	if err != nil {
 		return err
 	}
 	if rootID == "" {
 		return gdrive.Fatalf("no folder named %q found in your Drive. dhaara can only see folders it uploaded itself", cfg.RemoteName)
 	}
-	remote, _, _, err := readRemote(ctx, d, rootID, cfg.Exclude, ui)
+	remote, _, _, err := readRemote(ctx, ls, rootID, cfg.Exclude, ui)
 	if err != nil {
 		return err
 	}
-	removed, err := loadRemoved(ctx, d, cfg.RemoteName, rootID)
+	removed, err := loadRemoved(ctx, d, ls, cfg.RemoteName, rootID)
 	if err != nil {
 		return err
 	}
@@ -200,7 +201,7 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 		notes = append(notes, fmt.Sprintf("can't copy (missing or different in %s; run dhaara sync there first): %s", from, rel))
 	}
 
-	steps := mirrorSteps(plan, md5s, "copy to the phone", "on the phone")
+	steps := mirrorSteps(plan, md5s, "phone")
 	if cfg.applying == nil { // the check: save the plan, change nothing
 		printMirrorPlan(ui, plan, "copy to the phone", "on the phone")
 		if len(notReady) > 0 {
@@ -221,7 +222,7 @@ func Phone(ctx context.Context, cfg Config, ui *term.Console) error {
 		}
 		return err
 	}
-	plan = filterMirror(plan, md5s, matchSteps(ui, cfg.applying, steps))
+	plan = filterMirror(plan, md5s, "phone", matchSteps(ui, cfg.applying, steps))
 	if err := checkMassRemoval(len(plan.remove), len(local), "on the phone", cfg); err != nil {
 		return err
 	}

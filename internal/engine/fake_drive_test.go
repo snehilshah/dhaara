@@ -232,6 +232,9 @@ func (fd *fakeDrive) serve(w http.ResponseWriter, r *http.Request) {
 
 	case path == "/drive/v3/files" && r.Method == "GET":
 		parent := parentRe.FindStringSubmatch(q.Get("q"))[1]
+		if q.Get("pageToken") == "" {
+			fd.counts["list:"+parent]++ // one listing of this folder (its first page)
+		}
 		var kids []map[string]any
 		for _, id := range fd.order {
 			if f := fd.files[id]; f.Parent == parent && !f.Trashed {

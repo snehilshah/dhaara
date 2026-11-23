@@ -39,7 +39,8 @@ type Config struct {
 	Yes               bool                     // apply: don't ask
 	Confirm           func(prompt string) bool // apply: ask the user; nil when there's no terminal
 
-	applying *savedPlan // set by Apply: carry out this plan instead of saving one
+	applying *savedPlan       // set by Apply: carry out this plan instead of saving one
+	predict  *drivePrediction // tests: set to receive what a sync apply expects Drive to hold after it
 }
 
 // freeSpace is a variable so tests can pretend the disk is full.

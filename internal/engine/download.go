@@ -54,6 +54,13 @@ func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummar
 	if err != nil {
 		return sum, err
 	}
+	if !cfg.DryRun && !cfg.Pull { // a pull's changes are made by apply, which locks
+		release, err := lockFolder(cfg, cfg.RemoteName, "download")
+		if err != nil {
+			return sum, err
+		}
+		defer release()
+	}
 	if fi, err := os.Stat(target); err == nil && !fi.IsDir() {
 		return sum, gdrive.Fatalf("not a folder: %s", target)
 	}
@@ -63,14 +70,15 @@ func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummar
 		return sum, err
 	}
 	ui.Printf("Reading the Drive folder %q...", cfg.RemoteName)
-	rootID, _, err := gdrive.ResolveFolder(ctx, d, cfg.RemoteName, false)
+	ls := d.NewListings()
+	rootID, _, err := gdrive.ResolveFolder(ctx, ls, cfg.RemoteName, false)
 	if err != nil {
 		return sum, err
 	}
 	if rootID == "" {
 		return sum, gdrive.Fatalf("no folder named %q found in your Drive. dhaara can only see folders it uploaded itself", cfg.RemoteName)
 	}
-	dirs, files, skipped, err := listRemote(ctx, d, rootID)
+	dirs, files, skipped, err := listRemote(ctx, ls, rootID)
 	if err != nil {
 		return sum, err
 	}
@@ -98,7 +106,7 @@ func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummar
 	// pull: follow the removed list first; then fetch only what the plan allows.
 	replaceOK, allowed, notApplied := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	if cfg.Pull {
-		done, err := pullRemovalsAndMoves(ctx, cfg, ui, d, st, target, rootID, files, replaceOK, allowed)
+		done, err := pullRemovalsAndMoves(ctx, cfg, ui, d, ls, st, target, rootID, files, replaceOK, allowed)
 		if err != nil || done {
 			return sum, err
 		}
@@ -258,8 +266,8 @@ func Download(ctx context.Context, cfg Config, ui *term.Console) (DownloadSummar
 
 // listRemote walks the Drive folder. It returns local relative folder paths,
 // the files to download, and reasons for anything skipped.
-func listRemote(ctx context.Context, d *gdrive.Drive, rootID string) (dirs []string, files []remoteFile, skipped []string, err error) {
-	t, err := listTree(ctx, d, rootID)
+func listRemote(ctx context.Context, fs gdrive.Folders, rootID string) (dirs []string, files []remoteFile, skipped []string, err error) {
+	t, err := listTree(ctx, fs, rootID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
